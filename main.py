@@ -69,6 +69,15 @@ WHATS_NEW: dict[str, str] = {
         "so it works over the internet — not just on the home network.\n"
         "• Settings has new Password and HTTPS options for the AI server."
     ),
+    "1.0.3": (
+        "What's new in this version:\n"
+        "• Personal profiles — set your name in Settings (Cherry, Logan, BJ, "
+        "or your own). The AI greets you, remembers your past chats, and leans "
+        "into your interests.\n"
+        "• The AI now knows history: head-to-head series and standings on game "
+        "pages, and career + recent-season stats on player pages.\n"
+        "• Live player chips in the game view are clickable; assorted fixes."
+    ),
 }
 
 HITTING_FIELDS = [
@@ -437,55 +446,82 @@ class SettingsDialog(ctk.CTkToplevel):
         self.app = master
         self.on_changed = on_changed
         self.title(f"{APP_TITLE} — Settings")
-        self.geometry("480x600")
-        self.minsize(440, 560)
+        self.geometry("500x640")
+        self.minsize(460, 520)
         self.transient(master)
         self.grab_set()
 
-        self.grid_columnconfigure(0, weight=1)
+        bold = ctk.CTkFont(size=12, weight="bold")
 
+        # Fixed title
         ctk.CTkLabel(
             self, text="Settings",
-            font=ctk.CTkFont(size=18, weight="bold"),
-            anchor="w",
-        ).grid(row=0, column=0, padx=18, pady=(16, 16), sticky="ew")
+            font=ctk.CTkFont(size=18, weight="bold"), anchor="w",
+        ).pack(fill="x", padx=18, pady=(14, 6))
 
-        # Timezone
-        ctk.CTkLabel(
-            self, text="Display game times in:",
-            font=ctk.CTkFont(size=12, weight="bold"), anchor="w",
-        ).grid(row=1, column=0, padx=18, pady=(0, 4), sticky="ew")
+        # Scrollable body (so the dialog never outgrows the screen)
+        content = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=6, pady=0)
+        content.grid_columnconfigure(0, weight=1)
 
-        current_tz = user_settings.get("timezone") or "system"
-        current_label = user_settings.display_label_for(current_tz)
-        self.tz_var = ctk.StringVar(value=current_label)
-        tz_options = [label for label, _v in user_settings.TIMEZONE_CHOICES]
-        self.tz_menu = ctk.CTkOptionMenu(
-            self, values=tz_options, variable=self.tz_var, width=380,
+        # --- Your profile ---
+        ctk.CTkLabel(content, text="Your profile:", font=bold, anchor="w").pack(
+            fill="x", padx=12, pady=(8, 4)
         )
-        self.tz_menu.grid(row=2, column=0, padx=18, pady=(0, 14), sticky="ew")
+        prof = ctk.CTkFrame(content, fg_color="transparent")
+        prof.pack(fill="x", padx=12)
+        prof.grid_columnconfigure(1, weight=1)
 
-        # Auto-refresh
+        ctk.CTkLabel(prof, text="Your name:", width=80, anchor="w").grid(row=0, column=0, padx=(0, 6), pady=2, sticky="w")
+        self._last_name = user_settings.get("user_name") or ""
+        self.name_var = ctk.StringVar(value=self._last_name)
+        self.name_combo = ctk.CTkComboBox(
+            prof, values=user_settings.known_user_names(),
+            variable=self.name_var, command=self._on_name_pick,
+        )
+        self.name_combo.grid(row=0, column=1, padx=0, pady=2, sticky="ew")
+
+        ctk.CTkLabel(prof, text="Interests:", width=80, anchor="w").grid(row=1, column=0, padx=(0, 6), pady=2, sticky="w")
+        self.interests_var = ctk.StringVar(value=user_settings.get_interests(self._last_name))
+        ctk.CTkEntry(
+            prof, textvariable=self.interests_var,
+            placeholder_text="e.g. pitch speeds, Yankees, home runs",
+        ).grid(row=1, column=1, padx=0, pady=2, sticky="ew")
+
         ctk.CTkLabel(
-            self, text="Live data refresh:",
-            font=ctk.CTkFont(size=12, weight="bold"), anchor="w",
-        ).grid(row=3, column=0, padx=18, pady=(4, 4), sticky="ew")
+            content,
+            text="The AI greets you by name, leans into your interests, and remembers your past chats.",
+            font=ctk.CTkFont(size=11), text_color="gray60", anchor="w", justify="left",
+        ).pack(fill="x", padx=12, pady=(2, 12))
 
+        # --- Timezone ---
+        ctk.CTkLabel(content, text="Display game times in:", font=bold, anchor="w").pack(
+            fill="x", padx=12, pady=(0, 4)
+        )
+        current_tz = user_settings.get("timezone") or "system"
+        self.tz_var = ctk.StringVar(value=user_settings.display_label_for(current_tz))
+        tz_options = [label for label, _v in user_settings.TIMEZONE_CHOICES]
+        ctk.CTkOptionMenu(content, values=tz_options, variable=self.tz_var).pack(
+            fill="x", padx=12, pady=(0, 14)
+        )
+
+        # --- Auto-refresh ---
+        ctk.CTkLabel(content, text="Live data refresh:", font=bold, anchor="w").pack(
+            fill="x", padx=12, pady=(0, 4)
+        )
         self.refresh_var = ctk.BooleanVar(value=bool(user_settings.get("auto_refresh")))
         ctk.CTkCheckBox(
-            self,
+            content,
             text="Auto-refresh games every minute (and live game detail every 30 seconds)",
             variable=self.refresh_var, onvalue=True, offvalue=False,
-        ).grid(row=4, column=0, padx=18, pady=(0, 18), sticky="ew")
+        ).pack(fill="x", padx=12, pady=(0, 14))
 
-        # AI server settings
-        ctk.CTkLabel(
-            self, text="Local AI (Ollama) — used by the 'Ask AI' tab:",
-            font=ctk.CTkFont(size=12, weight="bold"), anchor="w",
-        ).grid(row=5, column=0, padx=18, pady=(4, 4), sticky="ew")
-
-        ai_grid = ctk.CTkFrame(self, fg_color="transparent")
-        ai_grid.grid(row=6, column=0, padx=18, pady=(0, 6), sticky="ew")
+        # --- AI server ---
+        ctk.CTkLabel(content, text="Local AI (Ollama) — used by the 'Ask AI' tab:", font=bold, anchor="w").pack(
+            fill="x", padx=12, pady=(0, 4)
+        )
+        ai_grid = ctk.CTkFrame(content, fg_color="transparent")
+        ai_grid.pack(fill="x", padx=12, pady=(0, 4))
         ai_grid.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(ai_grid, text="Server URL:", width=80, anchor="w").grid(row=0, column=0, padx=(0, 6), pady=2, sticky="w")
@@ -516,19 +552,19 @@ class SettingsDialog(ctk.CTkToplevel):
         ).grid(row=3, column=0, columnspan=2, padx=0, pady=(6, 2), sticky="w")
 
         self.ai_test_label = ctk.CTkLabel(
-            self, text="", font=ctk.CTkFont(size=11), text_color="gray60", anchor="w",
+            content, text="", font=ctk.CTkFont(size=11), text_color="gray60", anchor="w",
         )
-        self.ai_test_label.grid(row=7, column=0, padx=18, pady=(0, 4), sticky="ew")
+        self.ai_test_label.pack(fill="x", padx=12, pady=(0, 4))
 
         ctk.CTkButton(
-            self, text="Test AI connection", width=160, height=26,
+            content, text="Test AI connection", width=160, height=26,
             fg_color="gray30", hover_color="gray40",
             command=self._test_ai,
-        ).grid(row=8, column=0, padx=18, pady=(0, 14), sticky="w")
+        ).pack(anchor="w", padx=12, pady=(0, 12))
 
-        # Buttons
+        # Fixed buttons at the bottom
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.grid(row=9, column=0, padx=18, pady=(0, 16), sticky="ew")
+        btn_row.pack(fill="x", padx=18, pady=(6, 14))
         btn_row.grid_columnconfigure(0, weight=1)
         ctk.CTkButton(
             btn_row, text="Cancel", width=100,
@@ -541,8 +577,17 @@ class SettingsDialog(ctk.CTkToplevel):
 
         ensure_dialog_visible(self)
 
+    def _on_name_pick(self, choice: str) -> None:
+        """When the user switches name, save the interests typed for the previous
+        name and load the chosen name's interests."""
+        if self._last_name and self._last_name != choice:
+            user_settings.set_interests(self._last_name, self.interests_var.get().strip())
+        self.interests_var.set(user_settings.get_interests(choice))
+        self._last_name = choice
+
     def _save(self) -> None:
         tz_id = user_settings.tz_id_for_label(self.tz_var.get())
+        name = self.name_var.get().strip()
         user_settings.save({
             "timezone": tz_id,
             "auto_refresh": bool(self.refresh_var.get()),
@@ -550,7 +595,10 @@ class SettingsDialog(ctk.CTkToplevel):
             "ai_model": self.ai_model_var.get().strip() or "qwen2.5:7b",
             "ai_api_key": self.ai_key_var.get().strip(),
             "ai_verify_ssl": bool(self.ai_verify_var.get()),
+            "user_name": name,
         })
+        if name:
+            user_settings.set_interests(name, self.interests_var.get().strip())
         self.destroy()
         try:
             self.on_changed()
@@ -689,7 +737,9 @@ class AIChat(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent")
         self.app = app
         self.context_text = context_text
-        self.messages: list[dict[str, str]] = []
+        self.user_name = (user_settings.get("user_name") or "").strip()
+        # Resume this user's saved conversation so the AI continues where they left off.
+        self.messages: list[dict[str, str]] = user_settings.load_history(self.user_name)
         self.streaming = False
         self.stop_flag = False
         self._stream_text = ""
@@ -704,8 +754,9 @@ class AIChat(ctk.CTkFrame):
         # Header row
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=8, pady=(4, 0))
+        title = "Ask AI" if not self.user_name else f"Ask AI — {self.user_name}"
         ctk.CTkLabel(
-            header, text="Ask AI",
+            header, text=title,
             font=ctk.CTkFont(size=18, weight="bold"),
         ).pack(side="left")
         ctk.CTkButton(
@@ -758,20 +809,32 @@ class AIChat(ctk.CTkFrame):
         )
         self.send_btn.pack(side="right")
 
-        # Welcome / hint
-        if self.context_text:
-            suggestion = (
-                "Tip: I can see today's MLB schedule and the player or game you're "
-                "currently viewing. Try asking 'is this player hot or cold lately?', "
-                "'who's playing right now?', or 'who's most likely to win tonight?'"
-            )
+        # Replay this user's saved conversation, if any.
+        replayed = self._replay_history()
+
+        if not replayed:
+            # Welcome / hint (only when there's no prior conversation to resume)
+            if not self.user_name:
+                suggestion = (
+                    "Tip: set your name in Settings so I remember you and your past "
+                    "chats. I can also see today's MLB schedule — try 'who's playing "
+                    "right now?'."
+                )
+            elif self.context_text:
+                suggestion = (
+                    f"Welcome, {self.user_name}! I can see today's schedule and the "
+                    "player or game you're viewing. Try 'is this player hot or cold "
+                    "lately?' or 'who's most likely to win tonight?'"
+                )
+            else:
+                suggestion = (
+                    f"Welcome, {self.user_name}! I can see today's MLB schedule. Ask "
+                    "'who's playing right now?', or open a player page for player-"
+                    "specific questions."
+                )
+            self._add_assistant_bubble(suggestion)
         else:
-            suggestion = (
-                "Tip: I can see today's MLB schedule. Try asking 'who's playing right "
-                "now?', 'what's the score?', or open a player page for player-specific "
-                "questions."
-            )
-        self._add_assistant_bubble(suggestion)
+            self._add_assistant_bubble(f"Welcome back, {self.user_name} — picking up where we left off.")
 
         # Ping the server in the background, update status when done
         threading.Thread(target=self._ping_server, daemon=True).start()
@@ -890,6 +953,27 @@ class AIChat(ctk.CTkFrame):
         self._scroll_to_bottom()
         return label
 
+    def _add_note(self, text: str) -> None:
+        ctk.CTkLabel(
+            self.history, text=text,
+            font=ctk.CTkFont(size=10), text_color="gray60",
+        ).pack(fill="x", padx=8, pady=(6, 2))
+
+    def _replay_history(self, max_bubbles: int = 16) -> bool:
+        """Render this user's saved conversation as bubbles. Returns True if any shown."""
+        msgs = [m for m in self.messages if m.get("role") in ("user", "assistant")]
+        if not msgs:
+            return False
+        shown = msgs[-max_bubbles:]
+        if len(msgs) > len(shown):
+            self._add_note(f"— showing the last {len(shown)} of {len(msgs)} earlier messages —")
+        for m in shown:
+            if m["role"] == "user":
+                self._add_user_bubble(m.get("content", ""))
+            else:
+                self._add_assistant_bubble(m.get("content", ""))
+        return True
+
     def _scroll_to_bottom(self) -> None:
         def do():
             try:
@@ -902,6 +986,7 @@ class AIChat(ctk.CTkFrame):
         if self.streaming:
             self.stop_flag = True
         self.messages.clear()
+        user_settings.clear_history(self.user_name)
         for w in list(self.history.winfo_children()):
             w.destroy()
         self._add_assistant_bubble("Chat cleared.")
@@ -922,6 +1007,14 @@ class AIChat(ctk.CTkFrame):
         threading.Thread(target=self._refresh_realtime_context, daemon=True).start()
 
         sys_prompt = self.SYSTEM_PROMPT
+        if self.user_name:
+            sys_prompt += f"\n\nYou are chatting with {self.user_name}. Address them by name occasionally."
+            interests = user_settings.get_interests(self.user_name)
+            if interests:
+                sys_prompt += (
+                    f" Things {self.user_name} usually cares about: {interests}. "
+                    "Lean into these when relevant and proactively mention them."
+                )
         if self.realtime_context:
             sys_prompt += "\n\n" + self.realtime_context
         if self.context_text:
@@ -971,6 +1064,8 @@ class AIChat(ctk.CTkFrame):
                 else:
                     if final_text:
                         self.messages.append({"role": "assistant", "content": final_text})
+                        # Persist this user's conversation so it resumes next time.
+                        user_settings.save_history(self.user_name, self.messages)
                     else:
                         if self._stream_label is not None:
                             try:
@@ -1403,30 +1498,65 @@ class App(ctk.CTk):
         """Background-load the full player list so the first keystroke is instant."""
         threading.Thread(target=mlb_api.get_all_players, daemon=True).start()
 
-    def _build_player_context(self, bio: dict[str, Any], hit: dict[str, Any], pit: dict[str, Any]) -> str:
-        """Compact one-line summary of a player passed to the AI as context."""
+    @staticmethod
+    def _fmt_hit(s: dict[str, Any]) -> str:
+        return (
+            f"G={s.get('gamesPlayed')}, AB={s.get('atBats')}, H={s.get('hits')}, "
+            f"HR={s.get('homeRuns')}, RBI={s.get('rbi')}, BB={s.get('baseOnBalls')}, "
+            f"SO={s.get('strikeOuts')}, AVG={s.get('avg')}, OBP={s.get('obp')}, "
+            f"SLG={s.get('slg')}, OPS={s.get('ops')}"
+        )
+
+    @staticmethod
+    def _fmt_pit(s: dict[str, Any]) -> str:
+        return (
+            f"W-L={s.get('wins')}-{s.get('losses')}, ERA={s.get('era')}, "
+            f"G={s.get('gamesPlayed')}, GS={s.get('gamesStarted')}, "
+            f"IP={s.get('inningsPitched')}, K={s.get('strikeOuts')}, "
+            f"BB={s.get('baseOnBalls')}, WHIP={s.get('whip')}"
+        )
+
+    @staticmethod
+    def _fmt_seasons(seasons, fmt, exclude_season=None, n=3) -> str:
+        if not seasons:
+            return ""
+        filtered = [s for s in seasons if str(s.get("season")) != str(exclude_season)]
+        chosen = filtered[-n:]
+        return "; ".join(f"{s.get('season')}: {fmt(s.get('stat') or {})}" for s in chosen)
+
+    def _build_player_context(
+        self,
+        bio: dict[str, Any],
+        hit: dict[str, Any],
+        pit: dict[str, Any],
+        hit_history: dict[str, Any] | None = None,
+        pit_history: dict[str, Any] | None = None,
+    ) -> str:
+        """Summary of a player (current season + career + recent seasons) for the AI."""
+        hit_history = hit_history or {"career": {}, "seasons": []}
+        pit_history = pit_history or {"career": {}, "seasons": []}
+        cur = str(mlb_api.current_season())
         parts: list[str] = []
         name = bio.get("fullName", "Unknown")
         team = (bio.get("currentTeam") or {}).get("name", "—")
         pos = (bio.get("primaryPosition") or {}).get("name", "—")
         parts.append(f"Player: {name} ({pos}, {team})")
         if hit:
-            parts.append(
-                f"Hitting (current season): G={hit.get('gamesPlayed')}, "
-                f"AB={hit.get('atBats')}, H={hit.get('hits')}, "
-                f"HR={hit.get('homeRuns')}, RBI={hit.get('rbi')}, "
-                f"BB={hit.get('baseOnBalls')}, SO={hit.get('strikeOuts')}, "
-                f"AVG={hit.get('avg')}, OBP={hit.get('obp')}, "
-                f"SLG={hit.get('slg')}, OPS={hit.get('ops')}"
-            )
+            parts.append(f"Hitting {cur} season: {self._fmt_hit(hit)}")
+            career = hit_history.get("career") or {}
+            if career:
+                parts.append(f"Hitting career totals: {self._fmt_hit(career)}")
+            recent = self._fmt_seasons(hit_history.get("seasons"), self._fmt_hit, exclude_season=cur)
+            if recent:
+                parts.append(f"Hitting prior seasons — {recent}")
         if pit:
-            parts.append(
-                f"Pitching (current season): W-L={pit.get('wins')}-{pit.get('losses')}, "
-                f"ERA={pit.get('era')}, G={pit.get('gamesPlayed')}, "
-                f"GS={pit.get('gamesStarted')}, IP={pit.get('inningsPitched')}, "
-                f"K={pit.get('strikeOuts')}, BB={pit.get('baseOnBalls')}, "
-                f"WHIP={pit.get('whip')}"
-            )
+            parts.append(f"Pitching {cur} season: {self._fmt_pit(pit)}")
+            career = pit_history.get("career") or {}
+            if career:
+                parts.append(f"Pitching career totals: {self._fmt_pit(career)}")
+            recent = self._fmt_seasons(pit_history.get("seasons"), self._fmt_pit, exclude_season=cur)
+            if recent:
+                parts.append(f"Pitching prior seasons — {recent}")
         return " | ".join(parts)
 
     def _build_game_context(self, g: dict[str, Any]) -> str:
@@ -1452,6 +1582,38 @@ class App(ctk.CTk):
                 line += f" | At bat: {cb}"
             if cp:
                 line += f" | Pitching: {cp}"
+
+        # Standings / records (attached by the game fetch)
+        def _standing_str(team_dict, standing):
+            if not standing:
+                return ""
+            return (
+                f"{team_dict.get('name','?')} record: "
+                f"{standing.get('wins')}-{standing.get('losses')} "
+                f"(division rank {standing.get('divisionRank')}, "
+                f"GB {standing.get('gamesBack')}, streak {standing.get('streak')})"
+            )
+        for s in (_standing_str(away, g.get("_away_standing")),
+                  _standing_str(home, g.get("_home_standing"))):
+            if s:
+                line += f" | {s}"
+
+        # Head-to-head season series (attached by the game fetch)
+        h2h = g.get("_h2h") or []
+        if h2h:
+            finals = [
+                x for x in h2h
+                if (x.get("status") or "").startswith("Final") or x.get("status") == "Game Over"
+            ]
+            line += f" | Season series: {len(h2h)} games scheduled this season, {len(finals)} already played"
+            if finals:
+                results = "; ".join(
+                    f"{x['date']}: {x['away_name']} {x['away_score']} @ {x['home_name']} {x['home_score']}"
+                    for x in finals[:12]
+                )
+                line += f" ({results})"
+            else:
+                line += " (none played yet — this is their first meeting of the season)"
         return line
 
     def _force_search_focus(self) -> None:
@@ -1504,6 +1666,9 @@ class App(ctk.CTk):
             self._show_games_view(self._games_date)
         if self._current_game_pk is not None:
             self._show_game_detail(self._current_game_pk)
+        # If the AI tab is open, reopen it so a changed name/profile takes effect.
+        if self._detail_mode == "ai":
+            self._on_open_ai_chat()
 
     def _show_game_detail(self, game_pk: int) -> None:
         self._current_game_pk = game_pk
@@ -1515,10 +1680,21 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=14),
         ).pack(expand=True, pady=60)
         self._set_status(f"Loading game {game_pk}...")
-        run_in_thread(
-            lambda: mlb_api.get_game_detail(game_pk),
-            lambda r: self._on_game_detail_loaded(game_pk, r),
-        )
+
+        def fetch():
+            detail = mlb_api.get_game_detail(game_pk)
+            # Enrich with head-to-head series + standings for the AI context.
+            away_id = (detail.get("away") or {}).get("id")
+            home_id = (detail.get("home") or {}).get("id")
+            try:
+                detail["_h2h"] = mlb_api.get_head_to_head(away_id, home_id)
+                detail["_away_standing"] = mlb_api.get_team_standing(away_id)
+                detail["_home_standing"] = mlb_api.get_team_standing(home_id)
+            except Exception:
+                detail.setdefault("_h2h", [])
+            return detail
+
+        run_in_thread(fetch, lambda r: self._on_game_detail_loaded(game_pk, r))
 
     def _on_game_detail_loaded(self, game_pk: int, result: Any) -> None:
         if self._current_game_pk != game_pk:
@@ -1931,10 +2107,13 @@ class App(ctk.CTk):
             hit_recent = mlb_api.get_player_recent_stats(player_id, "hitting", 7) if hit else {}
             pit_recent = mlb_api.get_player_recent_stats(player_id, "pitching", 7) if pit else {}
             arsenal = mlb_api.get_pitch_arsenal(player_id) if pit else {"season": None, "pitches": []}
+            hit_history = mlb_api.get_player_history(player_id, "hitting") if hit else {"career": {}, "seasons": []}
+            pit_history = mlb_api.get_player_history(player_id, "pitching") if pit else {"career": {}, "seasons": []}
             img = mlb_api.get_headshot(player_id)
             return {
                 "bio": bio, "hit": hit, "pit": pit,
                 "hit_recent": hit_recent, "pit_recent": pit_recent,
+                "hit_history": hit_history, "pit_history": pit_history,
                 "arsenal": arsenal, "img": img,
             }
 
@@ -1952,6 +2131,8 @@ class App(ctk.CTk):
         pit: dict[str, Any] = result["pit"]
         hit_recent: dict[str, Any] = result.get("hit_recent") or {}
         pit_recent: dict[str, Any] = result.get("pit_recent") or {}
+        hit_history: dict[str, Any] = result.get("hit_history") or {"career": {}, "seasons": []}
+        pit_history: dict[str, Any] = result.get("pit_history") or {"career": {}, "seasons": []}
         arsenal: dict[str, Any] = result.get("arsenal") or {"season": None, "pitches": []}
         img: Image.Image | None = result["img"]
 
@@ -1959,7 +2140,9 @@ class App(ctk.CTk):
             ctk.CTkLabel(self.detail_frame, text="No player data.", text_color="tomato").pack(pady=40)
             return
 
-        self._ai_context_text = self._build_player_context(bio, hit, pit)
+        self._ai_context_text = self._build_player_context(
+            bio, hit, pit, hit_history, pit_history,
+        )
 
         scroll = ctk.CTkScrollableFrame(self.detail_frame)
         scroll.pack(fill="both", expand=True, padx=8, pady=8)

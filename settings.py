@@ -22,7 +22,11 @@ DEFAULTS: dict[str, Any] = {
     "ai_model": "qwen2.5:7b",
     "ai_api_key": "",        # password/token for a reverse-proxied server (blank = none)
     "ai_verify_ssl": True,   # turn off only for a self-signed HTTPS cert
+    "user_name": "",         # active user profile name (blank = no personalization)
 }
+
+# Preset names offered in the profile dropdown (users can also type their own).
+PRESET_USERS = ["Cherry", "Logan", "BJ"]
 
 # (display name, IANA id). "system" → local time from datetime.astimezone().
 TIMEZONE_CHOICES: list[tuple[str, str]] = [
@@ -144,3 +148,95 @@ def current_zone_label() -> str:
         h, m = divmod(abs(total) // 60, 60)
         return f"Local (UTC{sign}{h:02d}:{m:02d})"
     return display_label_for(tz_id)
+
+
+# ---------------------------------------------------------------------------
+# Per-user profiles (name + interests + saved chat history)
+# Stored in profiles.json next to settings.json so the AI can greet each
+# person and continue their previous conversation.
+# ---------------------------------------------------------------------------
+
+_profiles_cache: dict[str, Any] | None = None
+
+
+def _profiles_path() -> Path:
+    return _settings_path().parent / "profiles.json"
+
+
+def _load_profiles() -> dict[str, Any]:
+    global _profiles_cache
+    if _profiles_cache is not None:
+        return _profiles_cache
+    path = _profiles_path()
+    data: dict[str, Any] = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    _profiles_cache = data
+    return data
+
+
+def _save_profiles(data: dict[str, Any]) -> None:
+    global _profiles_cache
+    _profiles_cache = data
+    try:
+        _profiles_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _profile(name: str) -> dict[str, Any]:
+    return _load_profiles().get(name) or {"interests": "", "history": []}
+
+
+def known_user_names() -> list[str]:
+    """Preset names plus any custom names that already have a saved profile."""
+    names = list(PRESET_USERS)
+    for n in _load_profiles().keys():
+        if n and n not in names:
+            names.append(n)
+    return names
+
+
+def get_interests(name: str) -> str:
+    if not name:
+        return ""
+    return _profile(name).get("interests") or ""
+
+
+def set_interests(name: str, text: str) -> None:
+    if not name:
+        return
+    profs = _load_profiles()
+    prof = profs.get(name) or {"interests": "", "history": []}
+    prof["interests"] = text
+    profs[name] = prof
+    _save_profiles(profs)
+
+
+def load_history(name: str) -> list[dict[str, str]]:
+    if not name:
+        return []
+    return list(_profile(name).get("history") or [])
+
+
+def save_history(name: str, messages: list[dict[str, str]], cap: int = 40) -> None:
+    """Persist the most recent `cap` messages for a user."""
+    if not name:
+        return
+    profs = _load_profiles()
+    prof = profs.get(name) or {"interests": "", "history": []}
+    prof["history"] = list(messages)[-cap:]
+    profs[name] = prof
+    _save_profiles(profs)
+
+
+def clear_history(name: str) -> None:
+    if not name:
+        return
+    profs = _load_profiles()
+    if name in profs:
+        profs[name]["history"] = []
+        _save_profiles(profs)

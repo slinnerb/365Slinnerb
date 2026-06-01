@@ -127,6 +127,98 @@ def get_player_stats(player_id: int, group: str) -> dict[str, Any]:
     return {}
 
 
+@lru_cache(maxsize=256)
+def get_player_history(player_id: int, group: str) -> dict[str, Any]:
+    """Return {'career': {...}, 'seasons': [{'season': 'YYYY', 'stat': {...}}, ...]}
+    for hitting or pitching, in a single API call. Empty pieces if unavailable."""
+    try:
+        data = _get(
+            f"/people/{player_id}/stats",
+            stats="career,yearByYear",
+            group=group,
+        )
+    except requests.HTTPError:
+        return {"career": {}, "seasons": []}
+    career: dict[str, Any] = {}
+    seasons: list[dict[str, Any]] = []
+    for s in data.get("stats", []):
+        type_name = (s.get("type") or {}).get("displayName")
+        if type_name == "career":
+            for split in s.get("splits", []):
+                career = split.get("stat") or career
+        elif type_name == "yearByYear":
+            for split in s.get("splits", []):
+                stat = split.get("stat") or {}
+                season = split.get("season")
+                if stat and season:
+                    seasons.append({"season": season, "stat": stat})
+    return {"career": career, "seasons": seasons}
+
+
+def get_head_to_head(team_id: int, opponent_id: int, season: int | None = None) -> list[dict[str, Any]]:
+    """Return this season's games between two teams (the season series), with scores."""
+    if not team_id or not opponent_id:
+        return []
+    season = season or current_season()
+    try:
+        data = _get(
+            "/schedule",
+            sportId=1,
+            teamId=team_id,
+            opponentId=opponent_id,
+            season=season,
+            startDate=f"{season}-01-01",
+            endDate=f"{season}-12-31",
+        )
+    except requests.HTTPError:
+        return []
+    games: list[dict[str, Any]] = []
+    for d in data.get("dates", []):
+        for g in d.get("games", []):
+            home = (g.get("teams") or {}).get("home") or {}
+            away = (g.get("teams") or {}).get("away") or {}
+            games.append(
+                {
+                    "date": (g.get("gameDate") or "")[:10],
+                    "away_name": (away.get("team") or {}).get("name", ""),
+                    "away_score": away.get("score"),
+                    "home_name": (home.get("team") or {}).get("name", ""),
+                    "home_score": home.get("score"),
+                    "status": (g.get("status") or {}).get("detailedState", ""),
+                }
+            )
+    return games
+
+
+def get_team_standing(team_id: int, season: int | None = None) -> dict[str, Any]:
+    """Return a team's current W-L, division rank, games back, and streak."""
+    if not team_id:
+        return {}
+    season = season or current_season()
+    try:
+        data = _get(
+            "/standings",
+            leagueId="103,104",
+            season=season,
+            standingsTypes="regularSeason",
+        )
+    except requests.HTTPError:
+        return {}
+    for rec in data.get("records", []):
+        for tr in rec.get("teamRecords", []):
+            if (tr.get("team") or {}).get("id") == team_id:
+                return {
+                    "wins": tr.get("wins"),
+                    "losses": tr.get("losses"),
+                    "pct": tr.get("winningPercentage"),
+                    "divisionRank": tr.get("divisionRank"),
+                    "leagueRank": tr.get("leagueRank"),
+                    "gamesBack": tr.get("gamesBack"),
+                    "streak": (tr.get("streak") or {}).get("streakCode"),
+                }
+    return {}
+
+
 @lru_cache(maxsize=512)
 def get_pitch_arsenal(player_id: int) -> dict[str, Any]:
     """Return {'season': YYYY|None, 'pitches': [...]} — average velocity, usage %, and count

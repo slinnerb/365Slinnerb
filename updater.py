@@ -26,7 +26,7 @@ ASSET_PATTERN = re.compile(r"^MLB-Stats-Viewer.*\.exe$", re.IGNORECASE)
 
 # Bump this every release. Tag your GitHub release as "v" + this string,
 # e.g. VERSION = "1.0.1"  →  git tag v1.0.1
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 # ============================================================
 
 
