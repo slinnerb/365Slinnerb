@@ -28,16 +28,50 @@ def get_model() -> str:
     return user_settings.get("ai_model") or DEFAULT_MODEL
 
 
+def _auth_headers() -> dict[str, str]:
+    """Authorization header for a password-protected (reverse-proxied) server.
+    Empty when no key is configured (plain local Ollama needs none)."""
+    key = (user_settings.get("ai_api_key") or "").strip()
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
+def _verify_tls() -> bool:
+    """Whether to verify TLS certs. Users with a self-signed cert (Caddy
+    'tls internal') turn this off in Settings."""
+    return bool(user_settings.get("ai_verify_ssl"))
+
+
+def _request(method: str, path: str, **kwargs) -> requests.Response:
+    """Wrapper that injects auth headers + TLS-verify setting on every call."""
+    headers = {**_auth_headers(), **kwargs.pop("headers", {})}
+    verify = _verify_tls()
+    if not verify:
+        # Self-signed cert is expected — silence the noisy urllib3 warning.
+        try:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except Exception:
+            pass
+    return requests.request(
+        method, f"{get_base_url()}{path}", headers=headers, verify=verify, **kwargs
+    )
+
+
 def ping() -> tuple[bool, str]:
     """Quick connectivity check. Returns (ok, message)."""
     base = get_base_url()
     try:
-        r = requests.get(f"{base}/api/tags", timeout=3)
+        r = _request("GET", "/api/tags", timeout=4)
         if r.status_code == 200:
             return True, "Connected."
+        if r.status_code in (401, 403):
+            return False, (
+                f"Server rejected the password (HTTP {r.status_code}). "
+                "Check the API key / password in Settings."
+            )
         return False, f"Server returned HTTP {r.status_code}."
     except requests.ConnectionError:
-        return False, f"Couldn't reach {base}. Is Ollama running and reachable on this network?"
+        return False, f"Couldn't reach {base}. Is the server running and reachable?"
     except requests.Timeout:
         return False, f"Timed out reaching {base}."
     except Exception as e:
@@ -47,7 +81,7 @@ def ping() -> tuple[bool, str]:
 def list_models() -> list[str]:
     """Return model names available on the configured Ollama server."""
     try:
-        r = requests.get(f"{get_base_url()}/api/tags", timeout=5)
+        r = _request("GET", "/api/tags", timeout=5)
         r.raise_for_status()
         data = r.json()
         return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
@@ -67,14 +101,19 @@ def stream_chat(
 
     Designed to run inside a background thread — UI updates from on_chunk should
     be scheduled back onto the Tk main loop with widget.after()."""
-    url = f"{get_base_url()}/api/chat"
     payload: dict[str, Any] = {
         "model": get_model(),
         "messages": messages,
         "stream": True,
     }
     try:
-        with requests.post(url, json=payload, stream=True, timeout=timeout) as r:
+        with _request("POST", "/api/chat", json=payload, stream=True, timeout=timeout) as r:
+            if r.status_code in (401, 403):
+                on_done(
+                    f"Server rejected the password (HTTP {r.status_code}). "
+                    "Check the API key / password in Settings."
+                )
+                return
             if r.status_code != 200:
                 body = r.text[:300]
                 # 404 from Ollama almost always means the model isn't installed.

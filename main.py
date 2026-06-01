@@ -63,6 +63,12 @@ WHATS_NEW: dict[str, str] = {
         "• Fixed: the AI chat and player pages no longer disappear when "
         "left open"
     ),
+    "1.0.2": (
+        "What's new in this version:\n"
+        "• The Ask AI tab can now connect to a password-protected server, "
+        "so it works over the internet — not just on the home network.\n"
+        "• Settings has new Password and HTTPS options for the AI server."
+    ),
 }
 
 HITTING_FIELDS = [
@@ -431,8 +437,8 @@ class SettingsDialog(ctk.CTkToplevel):
         self.app = master
         self.on_changed = on_changed
         self.title(f"{APP_TITLE} — Settings")
-        self.geometry("460x520")
-        self.minsize(420, 460)
+        self.geometry("480x600")
+        self.minsize(440, 560)
         self.transient(master)
         self.grab_set()
 
@@ -490,9 +496,24 @@ class SettingsDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(ai_grid, text="Model:", width=80, anchor="w").grid(row=1, column=0, padx=(0, 6), pady=2, sticky="w")
         self.ai_model_var = ctk.StringVar(value=user_settings.get("ai_model") or "")
-        ctk.CTkEntry(ai_grid, textvariable=self.ai_model_var, placeholder_text="llama3").grid(
+        ctk.CTkEntry(ai_grid, textvariable=self.ai_model_var, placeholder_text="qwen2.5:7b").grid(
             row=1, column=1, padx=0, pady=2, sticky="ew",
         )
+
+        ctk.CTkLabel(ai_grid, text="Password:", width=80, anchor="w").grid(row=2, column=0, padx=(0, 6), pady=2, sticky="w")
+        self.ai_key_var = ctk.StringVar(value=user_settings.get("ai_api_key") or "")
+        ctk.CTkEntry(
+            ai_grid, textvariable=self.ai_key_var, show="•",
+            placeholder_text="(leave blank for a local, unprotected server)",
+        ).grid(row=2, column=1, padx=0, pady=2, sticky="ew")
+
+        self.ai_verify_var = ctk.BooleanVar(value=bool(user_settings.get("ai_verify_ssl")))
+        ctk.CTkCheckBox(
+            ai_grid,
+            text="Verify HTTPS certificate (uncheck for a self-signed cert)",
+            variable=self.ai_verify_var, onvalue=True, offvalue=False,
+            font=ctk.CTkFont(size=11),
+        ).grid(row=3, column=0, columnspan=2, padx=0, pady=(6, 2), sticky="w")
 
         self.ai_test_label = ctk.CTkLabel(
             self, text="", font=ctk.CTkFont(size=11), text_color="gray60", anchor="w",
@@ -526,7 +547,9 @@ class SettingsDialog(ctk.CTkToplevel):
             "timezone": tz_id,
             "auto_refresh": bool(self.refresh_var.get()),
             "ai_base_url": self.ai_url_var.get().strip() or "http://10.0.0.54:11434",
-            "ai_model": self.ai_model_var.get().strip() or "llama3",
+            "ai_model": self.ai_model_var.get().strip() or "qwen2.5:7b",
+            "ai_api_key": self.ai_key_var.get().strip(),
+            "ai_verify_ssl": bool(self.ai_verify_var.get()),
         })
         self.destroy()
         try:
@@ -538,7 +561,9 @@ class SettingsDialog(ctk.CTkToplevel):
         # Apply the entry values temporarily so ai.ping() uses what's typed
         user_settings.save({
             "ai_base_url": self.ai_url_var.get().strip() or "http://10.0.0.54:11434",
-            "ai_model": self.ai_model_var.get().strip() or "llama3",
+            "ai_model": self.ai_model_var.get().strip() or "qwen2.5:7b",
+            "ai_api_key": self.ai_key_var.get().strip(),
+            "ai_verify_ssl": bool(self.ai_verify_var.get()),
         })
         self.ai_test_label.configure(text="Testing…", text_color="gray60")
 

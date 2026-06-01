@@ -20,6 +20,8 @@ DEFAULTS: dict[str, Any] = {
     "last_seen_version": "",
     "ai_base_url": "http://10.0.0.54:11434",
     "ai_model": "qwen2.5:7b",
+    "ai_api_key": "",        # password/token for a reverse-proxied server (blank = none)
+    "ai_verify_ssl": True,   # turn off only for a self-signed HTTPS cert
 }
 
 # (display name, IANA id). "system" → local time from datetime.astimezone().
