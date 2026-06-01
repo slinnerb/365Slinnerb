@@ -997,6 +997,9 @@ class App(ctk.CTk):
         self._games_refresh_after_id: str | None = None
         self._detail_refresh_after_id: str | None = None
         self._ai_context_text: str | None = None  # last player/game viewed, for AI
+        # Tracks what currently occupies the right-hand detail pane so background
+        # refreshes never wipe an open player profile, game view, or AI chat.
+        self._detail_mode: str = "empty"  # one of: empty | player | game | ai
 
         self._build_layout()
         self._load_teams()
@@ -1094,6 +1097,7 @@ class App(ctk.CTk):
             child.destroy()
 
     def _show_placeholder(self, text: str) -> None:
+        self._detail_mode = "empty"
         self._clear_frame(self.detail_frame)
         ctk.CTkLabel(
             self.detail_frame, text=text, font=ctk.CTkFont(size=15), text_color="gray70"
@@ -1217,7 +1221,7 @@ class App(ctk.CTk):
             command=lambda: self._show_games_view(date),
         ).pack(side="right", padx=(4, 2))
 
-    def _on_games_loaded(self, date: datetime, result: Any) -> None:
+    def _on_games_loaded(self, date: datetime, result: Any, is_refresh: bool = False) -> None:
         if self._games_date != date:
             return
         self._clear_frame(self.players_frame)
@@ -1236,7 +1240,10 @@ class App(ctk.CTk):
             self._render_game_card(g)
         tz_label = user_settings.current_zone_label()
         self._set_status(f"{len(games)} game(s) on {date.strftime('%a %b %d, %Y')}  •  Times: {tz_label}")
-        if self._current_game_pk is None:
+        # Only show the hint in the detail pane on the FIRST load and only when the
+        # pane is empty — never on a background refresh, so we don't wipe an open
+        # player profile, game view, or AI chat.
+        if not is_refresh and self._detail_mode == "empty":
             self._show_placeholder("Click 'View Game' on any card to open a live in-app view,\nor click a team / probable pitcher to navigate.")
         self._schedule_games_refresh()
 
@@ -1257,7 +1264,7 @@ class App(ctk.CTk):
         def fetch():
             return mlb_api.get_schedule(date.strftime("%Y-%m-%d"))
 
-        run_in_thread(fetch, lambda r: self._on_games_loaded(date, r))
+        run_in_thread(fetch, lambda r: self._on_games_loaded(date, r, is_refresh=True))
 
     def _cancel_games_refresh(self) -> None:
         if self._games_refresh_after_id is not None:
@@ -1451,6 +1458,7 @@ class App(ctk.CTk):
     def _on_open_ai_chat(self) -> None:
         self._current_game_pk = None
         self._cancel_detail_refresh()
+        self._detail_mode = "ai"
         self._clear_frame(self.detail_frame)
         AIChat(self.detail_frame, app=self, context_text=self._ai_context_text).pack(
             fill="both", expand=True
@@ -1466,6 +1474,7 @@ class App(ctk.CTk):
     def _show_game_detail(self, game_pk: int) -> None:
         self._current_game_pk = game_pk
         self._cancel_detail_refresh()
+        self._detail_mode = "game"
         self._clear_frame(self.detail_frame)
         ctk.CTkLabel(
             self.detail_frame, text="Loading game...", text_color="gray70",
@@ -1873,6 +1882,7 @@ class App(ctk.CTk):
     def _on_player_selected(self, player_id: int) -> None:
         self._current_game_pk = None
         self._cancel_detail_refresh()
+        self._detail_mode = "player"
         self._clear_frame(self.detail_frame)
         ctk.CTkLabel(
             self.detail_frame, text="Loading player...", text_color="gray70",
