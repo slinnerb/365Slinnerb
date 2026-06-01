@@ -53,7 +53,16 @@ APP_VERSION = updater.VERSION
 # the user updates into. Add a key per release; the dialog stays silent when
 # the running VERSION has no matching key.
 WHATS_NEW: dict[str, str] = {
-    "1.0.1": "cherry is cute",
+    "1.0.1": (
+        "cherry is cute\n\n"
+        "What's new in this version:\n"
+        "• Ask AI tab — chat with a local AI about players and games "
+        "(works on your home network)\n"
+        "• Fixed: you can now type in the search bar on all PCs\n"
+        "• Fixed: Settings and Update windows now appear in front\n"
+        "• Fixed: the AI chat and player pages no longer disappear when "
+        "left open"
+    ),
 }
 
 HITTING_FIELDS = [
