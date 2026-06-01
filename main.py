@@ -78,7 +78,32 @@ WHATS_NEW: dict[str, str] = {
         "pages, and career + recent-season stats on player pages.\n"
         "• Live player chips in the game view are clickable; assorted fixes."
     ),
+    "1.0.4": (
+        "What's new in this version — four new ways to browse:\n"
+        "• Standings — all six divisions with records, games back, and streaks.\n"
+        "• League Leaders — top players by HR, AVG, ERA, strikeouts, and more.\n"
+        "• Favorites — star teams and players (per person); see your team's "
+        "next and last game at a glance.\n"
+        "• Team pages — click a team for its record, standing, and schedule.\n"
+        "• Probable starters' pitch arsenals now show on the game page."
+    ),
 }
+
+# (display label, MLB API category key, stat group) for the League Leaders view.
+LEADER_CATEGORIES = [
+    ("Home Runs", "homeRuns", "hitting"),
+    ("Batting Average", "battingAverage", "hitting"),
+    ("RBI", "runsBattedIn", "hitting"),
+    ("OPS", "onBasePlusSlugging", "hitting"),
+    ("Hits", "hits", "hitting"),
+    ("Runs", "runs", "hitting"),
+    ("Stolen Bases", "stolenBases", "hitting"),
+    ("ERA", "earnedRunAverage", "pitching"),
+    ("Strikeouts (P)", "strikeouts", "pitching"),
+    ("Wins", "wins", "pitching"),
+    ("Saves", "saves", "pitching"),
+    ("WHIP", "walksAndHitsPerInningPitched", "pitching"),
+]
 
 HITTING_FIELDS = [
     ("gamesPlayed", "Games"),
@@ -151,6 +176,19 @@ PITCHING_FIELDS = [
     ("walksPer9Inn", "Walks per 9 Innings"),
     ("strikeoutWalkRatio", "Strikeout-to-Walk Ratio"),
 ]
+
+
+def _ordinal(n) -> str:
+    """1 -> '1st', 2 -> '2nd', etc. Tolerates strings and None."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return str(n) if n else "—"
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
 
 
 def ensure_dialog_visible(top: ctk.CTkToplevel) -> None:
@@ -1201,8 +1239,32 @@ class App(ctk.CTk):
             command=self._on_check_for_updates,
         ).grid(row=0, column=7, padx=(0, 18), pady=14)
 
-        self.teams_frame = ctk.CTkScrollableFrame(self, label_text="Teams")
-        self.teams_frame.grid(row=1, column=0, padx=(10, 5), pady=(0, 10), sticky="nsew")
+        # Left column: navigation buttons on top, Teams list below
+        left_col = ctk.CTkFrame(self, fg_color="transparent")
+        left_col.grid(row=1, column=0, padx=(10, 5), pady=(0, 10), sticky="nsew")
+        left_col.grid_columnconfigure(0, weight=1)
+        left_col.grid_rowconfigure(1, weight=1)
+
+        nav = ctk.CTkFrame(left_col)
+        nav.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ctk.CTkButton(
+            nav, text="Standings", height=30,
+            fg_color="#2b5c8a", hover_color="#1f4666",
+            command=self._show_standings,
+        ).pack(fill="x", padx=6, pady=(6, 2))
+        ctk.CTkButton(
+            nav, text="League Leaders", height=30,
+            fg_color="#2b5c8a", hover_color="#1f4666",
+            command=self._show_leaders,
+        ).pack(fill="x", padx=6, pady=2)
+        ctk.CTkButton(
+            nav, text="★ Favorites", height=30,
+            fg_color="#8a6d2b", hover_color="#665020",
+            command=self._show_favorites,
+        ).pack(fill="x", padx=6, pady=(2, 6))
+
+        self.teams_frame = ctk.CTkScrollableFrame(left_col, label_text="Teams")
+        self.teams_frame.grid(row=1, column=0, sticky="nsew")
 
         self.players_label_var = ctk.StringVar(value="Players")
         self.players_frame = ctk.CTkScrollableFrame(self, label_text="Players")
@@ -1256,6 +1318,8 @@ class App(ctk.CTk):
 
     def _on_team_selected(self, team_id: int, team_name: str) -> None:
         self.selected_team_id = team_id
+        self._games_date = None
+        self._cancel_games_refresh()
         self.players_frame.configure(label_text=f"Roster — {team_name}")
         self._clear_frame(self.players_frame)
         ctk.CTkLabel(self.players_frame, text="Loading roster...", text_color="gray70").pack(pady=20)
@@ -1264,6 +1328,76 @@ class App(ctk.CTk):
             lambda: mlb_api.get_roster(team_id),
             lambda r: self._on_roster_loaded(team_name, r),
         )
+        # Also show a team page (record, standing, last/next game) in the detail pane.
+        self._show_team_page(team_id, team_name)
+
+    def _show_team_page(self, team_id: int, team_name: str) -> None:
+        self._current_game_pk = None
+        self._cancel_detail_refresh()
+        self._detail_mode = "team"
+        self._clear_frame(self.detail_frame)
+        ctk.CTkLabel(self.detail_frame, text=f"Loading {team_name}…", text_color="gray70").pack(expand=True, pady=60)
+
+        def fetch():
+            return {
+                "standing": mlb_api.get_team_standing(team_id),
+                "games": mlb_api.get_team_games(team_id),
+            }
+
+        run_in_thread(fetch, lambda r: self._render_team_page(team_id, team_name, r))
+
+    def _render_team_page(self, team_id: int, team_name: str, result: Any) -> None:
+        if self._detail_mode != "team" or self.selected_team_id != team_id:
+            return
+        self._clear_frame(self.detail_frame)
+        scroll = ctk.CTkScrollableFrame(self.detail_frame)
+        scroll.pack(fill="both", expand=True, padx=8, pady=8)
+
+        # Title + favorite star
+        head = ctk.CTkFrame(scroll, fg_color="transparent")
+        head.pack(fill="x", padx=8, pady=(4, 6))
+        ctk.CTkLabel(head, text=team_name, font=ctk.CTkFont(size=22, weight="bold"), anchor="w").pack(side="left")
+        self._add_fav_button(head, "teams", {"id": team_id, "name": team_name})
+
+        standing = (result or {}).get("standing") or {}
+        if standing:
+            rank = standing.get("divisionRank")
+            div = standing.get("division") or ""
+            gb = standing.get("gamesBack")
+            txt = (
+                f"{standing.get('wins')}-{standing.get('losses')}  ({standing.get('pct')})   •   "
+                f"{_ordinal(rank)} in {div}   •   GB: {gb}   •   Streak: {standing.get('streak')}"
+            )
+            ctk.CTkLabel(scroll, text=txt, font=ctk.CTkFont(size=13), text_color=("gray20", "gray85"), anchor="w").pack(anchor="w", padx=10, pady=(0, 10))
+
+        games = (result or {}).get("games") or {}
+        last, nxt = games.get("last"), games.get("next")
+        gp = ctk.CTkFrame(scroll)
+        gp.pack(fill="x", padx=6, pady=6)
+        ctk.CTkLabel(gp, text="Schedule", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(anchor="w", padx=10, pady=(8, 2))
+        if last:
+            ctk.CTkButton(
+                gp, text=f"Last: {last['away_name']} {last['away_score']} @ {last['home_name']} {last['home_score']}  ({last['date']})",
+                anchor="w", height=28, fg_color=("gray85", "gray25"), text_color=("gray10", "gray90"),
+                hover_color=("gray80", "gray30"), font=ctk.CTkFont(size=12),
+                command=lambda pk=last.get("gamePk"): self._show_game_detail(pk) if pk else None,
+            ).pack(fill="x", padx=10, pady=2)
+        if nxt:
+            t = self._format_game_time(nxt.get("gameDate"))
+            ctk.CTkButton(
+                gp, text=f"Next: {nxt['away_name']} @ {nxt['home_name']}  —  {nxt['date']} {t}",
+                anchor="w", height=28, fg_color=("gray85", "gray25"), text_color=("gray10", "gray90"),
+                hover_color=("gray80", "gray30"), font=ctk.CTkFont(size=12),
+                command=lambda pk=nxt.get("gamePk"): self._show_game_detail(pk) if pk else None,
+            ).pack(fill="x", padx=10, pady=2)
+        if not last and not nxt:
+            ctk.CTkLabel(gp, text="No nearby games found.", text_color="gray60").pack(anchor="w", padx=10, pady=4)
+
+        ctk.CTkLabel(
+            scroll, text="The full roster is in the middle column — click any player.",
+            font=ctk.CTkFont(size=11), text_color="gray60", anchor="w",
+        ).pack(anchor="w", padx=10, pady=(10, 4))
+        self._set_status(f"{team_name} — team page.")
 
     def _on_roster_loaded(self, team_name: str, result: Any) -> None:
         self._clear_frame(self.players_frame)
@@ -1598,6 +1732,31 @@ class App(ctk.CTk):
             if s:
                 line += f" | {s}"
 
+        # Probable starters' arsenals with average velocities (attached by the fetch)
+        def _arsenal_str(team_dict):
+            pname = team_dict.get("probablePitcherName") or "TBD"
+            ars = team_dict.get("_arsenal") or {}
+            pitches = ars.get("pitches") or []
+            if not pitches or pname == "TBD":
+                return ""
+            parts = []
+            for p in pitches[:7]:
+                spd = p.get("averageSpeed")
+                pct = p.get("percentage")
+                desc = p.get("description") or p.get("code") or "?"
+                if isinstance(spd, (int, float)):
+                    seg = f"{desc} {spd:.1f} mph"
+                    if isinstance(pct, (int, float)):
+                        seg += f" ({pct * 100:.0f}%)"
+                    parts.append(seg)
+            if not parts:
+                return ""
+            season_note = f" [{ars.get('season')} data]" if ars.get("season") else ""
+            return f"{pname}'s pitch arsenal{season_note}: " + ", ".join(parts)
+        for s in (_arsenal_str(away), _arsenal_str(home)):
+            if s:
+                line += f" | {s}"
+
         # Head-to-head season series (attached by the game fetch)
         h2h = g.get("_h2h") or []
         if h2h:
@@ -1670,6 +1829,237 @@ class App(ctk.CTk):
         if self._detail_mode == "ai":
             self._on_open_ai_chat()
 
+    def _add_fav_button(self, parent, kind: str, item: dict[str, Any]):
+        """A ★ toggle that adds/removes `item` from the active user's favorites."""
+        name = (user_settings.get("user_name") or "").strip()
+        btn = ctk.CTkButton(parent, width=120, height=28)
+
+        def refresh():
+            if not name:
+                btn.configure(text="★ Favorite", fg_color="gray35", hover_color="gray45")
+            elif user_settings.is_favorite(name, kind, item.get("id")):
+                btn.configure(text="★ Favorited", fg_color="#8a6d2b", hover_color="#665020")
+            else:
+                btn.configure(text="☆ Add favorite", fg_color="gray35", hover_color="gray45")
+
+        def on_click():
+            if not name:
+                self._set_status("Set your name in Settings to save favorites.")
+                return
+            user_settings.toggle_favorite(name, kind, item)
+            refresh()
+
+        btn.configure(command=on_click)
+        refresh()
+        btn.pack(side="right")
+        return btn
+
+    # ----- Standings view -----
+    def _show_standings(self) -> None:
+        self._current_game_pk = None
+        self._cancel_detail_refresh()
+        self._detail_mode = "standings"
+        self._clear_frame(self.detail_frame)
+        ctk.CTkLabel(self.detail_frame, text="Loading standings…", text_color="gray70").pack(expand=True, pady=60)
+        self._set_status("Loading standings…")
+        run_in_thread(mlb_api.get_standings, self._render_standings)
+
+    def _render_standings(self, result: Any) -> None:
+        if self._detail_mode != "standings":
+            return
+        self._clear_frame(self.detail_frame)
+        if isinstance(result, Exception) or not result:
+            ctk.CTkLabel(self.detail_frame, text="Couldn't load standings.", text_color="tomato").pack(pady=40)
+            return
+        scroll = ctk.CTkScrollableFrame(self.detail_frame)
+        scroll.pack(fill="both", expand=True, padx=8, pady=8)
+        ctk.CTkLabel(
+            scroll, text=f"MLB Standings — {mlb_api.current_season()}",
+            font=ctk.CTkFont(size=18, weight="bold"), anchor="w",
+        ).pack(anchor="w", padx=8, pady=(4, 8))
+
+        for div in result:
+            block = ctk.CTkFrame(scroll)
+            block.pack(fill="x", padx=6, pady=6)
+            ctk.CTkLabel(
+                block, text=div["name"], font=ctk.CTkFont(size=14, weight="bold"), anchor="w",
+            ).pack(anchor="w", padx=10, pady=(8, 2))
+
+            tbl = ctk.CTkFrame(block, fg_color="transparent")
+            tbl.pack(fill="x", padx=6, pady=(0, 8))
+            headers = ["Team", "W", "L", "PCT", "GB", "Strk"]
+            widths = [2, 1, 1, 1, 1, 1]
+            for c, (h, w) in enumerate(zip(headers, widths)):
+                tbl.grid_columnconfigure(c, weight=w, uniform="stand")
+                ctk.CTkLabel(
+                    tbl, text=h, font=ctk.CTkFont(size=10, weight="bold"),
+                    text_color="gray60", anchor="w" if c == 0 else "center",
+                ).grid(row=0, column=c, padx=2, pady=(2, 4), sticky="ew")
+
+            for r, t in enumerate(div["teams"], start=1):
+                btn = ctk.CTkButton(
+                    tbl, text=f"{t['divisionRank']}. {t['name']}", anchor="w", height=24,
+                    fg_color="transparent", text_color=("gray10", "gray90"),
+                    hover_color=("gray80", "gray28"), font=ctk.CTkFont(size=12),
+                    command=lambda tid=t["id"], tn=t["name"]: self._on_team_selected(tid, tn),
+                )
+                btn.grid(row=r, column=0, padx=2, pady=1, sticky="ew")
+                vals = [t["wins"], t["losses"], t["pct"], t["gamesBack"], t["streak"]]
+                for c, v in enumerate(vals, start=1):
+                    ctk.CTkLabel(
+                        tbl, text=str(v if v is not None else "—"),
+                        font=ctk.CTkFont(size=12), anchor="center",
+                    ).grid(row=r, column=c, padx=2, pady=1, sticky="ew")
+        self._set_status(f"Standings — {mlb_api.current_season()}.")
+
+    # ----- League Leaders view -----
+    def _show_leaders(self) -> None:
+        self._current_game_pk = None
+        self._cancel_detail_refresh()
+        self._detail_mode = "leaders"
+        self._clear_frame(self.detail_frame)
+
+        header = ctk.CTkFrame(self.detail_frame, fg_color="transparent")
+        header.pack(fill="x", padx=8, pady=(8, 4))
+        ctk.CTkLabel(
+            header, text="League Leaders", font=ctk.CTkFont(size=18, weight="bold"),
+        ).pack(side="left")
+        labels = [lbl for lbl, _k, _g in LEADER_CATEGORIES]
+        self._leader_cat_var = ctk.StringVar(value=labels[0])
+        ctk.CTkOptionMenu(
+            header, values=labels, variable=self._leader_cat_var,
+            width=190, command=lambda _c: self._load_leaders(),
+        ).pack(side="right")
+
+        self._leaders_body = ctk.CTkScrollableFrame(self.detail_frame)
+        self._leaders_body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self._load_leaders()
+
+    def _load_leaders(self) -> None:
+        label = self._leader_cat_var.get()
+        cat = next((c for c in LEADER_CATEGORIES if c[0] == label), LEADER_CATEGORIES[0])
+        _lbl, key, group = cat
+        self._clear_frame(self._leaders_body)
+        ctk.CTkLabel(self._leaders_body, text="Loading…", text_color="gray70").pack(pady=20)
+        self._set_status(f"Loading {label} leaders…")
+        run_in_thread(
+            lambda: mlb_api.get_leaders(key, group, limit=15),
+            lambda r: self._render_leaders(label, r),
+        )
+
+    def _render_leaders(self, label: str, result: Any) -> None:
+        if self._detail_mode != "leaders":
+            return
+        self._clear_frame(self._leaders_body)
+        if isinstance(result, Exception) or not result:
+            ctk.CTkLabel(self._leaders_body, text="No leader data available.", text_color="gray70").pack(pady=20)
+            return
+        ctk.CTkLabel(
+            self._leaders_body, text=f"{label} — {mlb_api.current_season()} leaders",
+            font=ctk.CTkFont(size=12, weight="bold"), text_color="gray60", anchor="w",
+        ).pack(anchor="w", padx=6, pady=(2, 6))
+        for ldr in result:
+            row = ctk.CTkFrame(self._leaders_body, fg_color=("gray88", "gray22"), corner_radius=6)
+            row.pack(fill="x", padx=4, pady=2)
+            row.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(
+                row, text=f"{ldr['rank']}", width=28, font=ctk.CTkFont(size=13, weight="bold"),
+                text_color="gray60",
+            ).grid(row=0, column=0, padx=(8, 4), pady=6)
+            btn = ctk.CTkButton(
+                row, text=f"{ldr['name']}  ({ldr['team']})", anchor="w", height=26,
+                fg_color="transparent", text_color=("gray10", "gray90"),
+                hover_color=("gray80", "gray30"), font=ctk.CTkFont(size=12),
+                command=(lambda pid=ldr["id"]: self._on_player_selected(pid)) if ldr.get("id") else None,
+            )
+            btn.grid(row=0, column=1, padx=2, pady=2, sticky="ew")
+            ctk.CTkLabel(
+                row, text=str(ldr["value"]), font=ctk.CTkFont(size=15, weight="bold"),
+                width=70, anchor="e",
+            ).grid(row=0, column=2, padx=(4, 12), pady=6)
+        self._set_status(f"{label} leaders — {mlb_api.current_season()}.")
+
+    # ----- Favorites view -----
+    def _show_favorites(self) -> None:
+        self._current_game_pk = None
+        self._cancel_detail_refresh()
+        self._detail_mode = "favorites"
+        self._clear_frame(self.detail_frame)
+        name = (user_settings.get("user_name") or "").strip()
+        scroll = ctk.CTkScrollableFrame(self.detail_frame)
+        scroll.pack(fill="both", expand=True, padx=8, pady=8)
+
+        title = "Favorites" if not name else f"{name}'s Favorites"
+        ctk.CTkLabel(scroll, text=title, font=ctk.CTkFont(size=18, weight="bold"), anchor="w").pack(anchor="w", padx=8, pady=(4, 6))
+
+        if not name:
+            ctk.CTkLabel(
+                scroll, text="Set your name in Settings first, then star teams and players to see them here.",
+                text_color="gray70", wraplength=520, justify="left", anchor="w",
+            ).pack(anchor="w", padx=8, pady=10)
+            self._set_status("Favorites — set your name in Settings.")
+            return
+
+        fav_teams = user_settings.get_favorites(name, "teams")
+        fav_players = user_settings.get_favorites(name, "players")
+
+        if not fav_teams and not fav_players:
+            ctk.CTkLabel(
+                scroll,
+                text="No favorites yet. Open a team or player and click the ★ button to add them.",
+                text_color="gray70", wraplength=520, justify="left", anchor="w",
+            ).pack(anchor="w", padx=8, pady=10)
+
+        if fav_teams:
+            ctk.CTkLabel(scroll, text="Your teams — next & last game", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(anchor="w", padx=8, pady=(8, 2))
+            container = ctk.CTkFrame(scroll, fg_color="transparent")
+            container.pack(fill="x", padx=4)
+            for t in fav_teams:
+                self._render_fav_team_card(container, t)
+
+        if fav_players:
+            ctk.CTkLabel(scroll, text="Your players", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(anchor="w", padx=8, pady=(12, 2))
+            for p in fav_players:
+                ctk.CTkButton(
+                    scroll, text=f"  {p['name']}", anchor="w", height=28,
+                    fg_color=("gray88", "gray22"), text_color=("gray10", "gray90"),
+                    hover_color=("gray80", "gray30"),
+                    command=lambda pid=p["id"]: self._on_player_selected(pid),
+                ).pack(fill="x", padx=6, pady=2)
+        self._set_status(f"{name}'s favorites.")
+
+    def _render_fav_team_card(self, parent, team) -> None:
+        card = ctk.CTkFrame(parent, fg_color=("gray88", "gray22"), corner_radius=6)
+        card.pack(fill="x", padx=2, pady=3)
+        ctk.CTkButton(
+            card, text=team["name"], anchor="w", height=26,
+            fg_color="transparent", text_color=("#1f6aa5", "#7fc4ff"),
+            hover_color=("gray80", "gray30"), font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda tid=team["id"], tn=team["name"]: self._on_team_selected(tid, tn),
+        ).pack(fill="x", padx=4, pady=(4, 0))
+        info = ctk.CTkLabel(card, text="Loading games…", font=ctk.CTkFont(size=11), text_color="gray60", anchor="w", justify="left")
+        info.pack(anchor="w", padx=10, pady=(0, 6))
+
+        def fetch():
+            return mlb_api.get_team_games(team["id"])
+
+        def show(res):
+            if not info.winfo_exists():
+                return
+            if isinstance(res, Exception) or not res:
+                info.configure(text="(couldn't load games)")
+                return
+            lines = []
+            last, nxt = res.get("last"), res.get("next")
+            if last:
+                lines.append(f"Last: {last['away_name']} {last['away_score']} @ {last['home_name']} {last['home_score']} ({last['date']})")
+            if nxt:
+                t = self._format_game_time(nxt.get("gameDate"))
+                lines.append(f"Next: {nxt['away_name']} @ {nxt['home_name']} — {nxt['date']} {t}")
+            info.configure(text="\n".join(lines) if lines else "No nearby games.")
+
+        run_in_thread(fetch, show)
+
     def _show_game_detail(self, game_pk: int) -> None:
         self._current_game_pk = game_pk
         self._cancel_detail_refresh()
@@ -1684,14 +2074,19 @@ class App(ctk.CTk):
         def fetch():
             detail = mlb_api.get_game_detail(game_pk)
             # Enrich with head-to-head series + standings for the AI context.
-            away_id = (detail.get("away") or {}).get("id")
-            home_id = (detail.get("home") or {}).get("id")
+            away = detail.get("away") or {}
+            home = detail.get("home") or {}
             try:
-                detail["_h2h"] = mlb_api.get_head_to_head(away_id, home_id)
-                detail["_away_standing"] = mlb_api.get_team_standing(away_id)
-                detail["_home_standing"] = mlb_api.get_team_standing(home_id)
+                detail["_h2h"] = mlb_api.get_head_to_head(away.get("id"), home.get("id"))
+                detail["_away_standing"] = mlb_api.get_team_standing(away.get("id"))
+                detail["_home_standing"] = mlb_api.get_team_standing(home.get("id"))
             except Exception:
                 detail.setdefault("_h2h", [])
+            # Probable starters' arsenals (pitch types + average velocities).
+            for side in ("away", "home"):
+                team = detail.get(side) or {}
+                pid = team.get("probablePitcherId")
+                team["_arsenal"] = mlb_api.get_pitch_arsenal(pid) if pid else {"season": None, "pitches": []}
             return detail
 
         run_in_thread(fetch, lambda r: self._on_game_detail_loaded(game_pk, r))
@@ -1758,6 +2153,9 @@ class App(ctk.CTk):
         if innings:
             self._render_linescore(scroll, g, away, home, innings)
 
+        # Probable starters' pitch arsenals (type, speed, usage %)
+        self._render_game_arsenals(scroll, away, home)
+
         # Browser links
         link_row = ctk.CTkFrame(scroll, fg_color="transparent")
         link_row.pack(fill="x", padx=8, pady=(12, 6))
@@ -1775,6 +2173,71 @@ class App(ctk.CTk):
         if is_live or is_final:
             self._render_team_box(scroll, away, "Away — " + (away.get("name") or "Away"))
             self._render_team_box(scroll, home, "Home — " + (home.get("name") or "Home"))
+
+    def _render_game_arsenals(self, parent, away, home) -> None:
+        """Show each probable starter's pitch mix (type, avg speed, usage %)."""
+        entries = []
+        for side, team in (("Away", away), ("Home", home)):
+            ars = team.get("_arsenal") or {}
+            if ars.get("pitches") and team.get("probablePitcherName"):
+                entries.append((side, team.get("probablePitcherName"), team.get("probablePitcherId"), ars))
+        if not entries:
+            return
+
+        block = ctk.CTkFrame(parent)
+        block.pack(fill="x", padx=8, pady=8)
+        ctk.CTkLabel(
+            block, text="Probable Starters — Pitch Arsenal",
+            font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
+        ).pack(anchor="w", padx=12, pady=(8, 2))
+        ctk.CTkLabel(
+            block, text="Most-used pitch first, with average velocity and how often it's thrown.",
+            font=ctk.CTkFont(size=11), text_color="gray60", anchor="w",
+        ).pack(anchor="w", padx=12, pady=(0, 6))
+
+        for side, pname, pid, ars in entries:
+            header = ctk.CTkFrame(block, fg_color="transparent")
+            header.pack(fill="x", padx=10, pady=(6, 0))
+            season = ars.get("season")
+            label = f"{side}: {pname}" + (f"  ({season} data)" if season else "")
+            btn = ctk.CTkButton(
+                header, text=label, anchor="w", height=24,
+                fg_color="transparent",
+                text_color=("#1f6aa5", "#7fc4ff"),
+                hover_color=("gray80", "gray28"),
+                font=ctk.CTkFont(size=12, weight="bold"),
+                command=(lambda p=pid: self._on_player_selected(p)) if pid else None,
+            )
+            btn.pack(anchor="w")
+
+            grid = ctk.CTkFrame(block, fg_color="transparent")
+            grid.pack(fill="x", padx=8, pady=(2, 8))
+            cols = 4
+            for i, p in enumerate(ars.get("pitches", [])):
+                r, c = divmod(i, cols)
+                name = p.get("description") or p.get("code") or "—"
+                spd = p.get("averageSpeed")
+                pct = p.get("percentage")
+                spd_text = f"{spd:.1f} mph" if isinstance(spd, (int, float)) else "—"
+                pct_text = f"{pct * 100:.0f}%" if isinstance(pct, (int, float)) else "—"
+
+                cell = ctk.CTkFrame(grid, fg_color=("gray85", "gray22"), corner_radius=6, height=86)
+                cell.grid(row=r, column=c, padx=3, pady=3, sticky="nsew")
+                cell.grid_propagate(False)
+                cell.grid_columnconfigure(0, weight=1)
+                grid.grid_columnconfigure(c, weight=1, uniform="garsenal")
+
+                ctk.CTkLabel(
+                    cell, text=name, font=ctk.CTkFont(size=11, weight="bold"),
+                    text_color="gray60", wraplength=110, justify="center",
+                ).grid(row=0, column=0, padx=4, pady=(8, 0), sticky="ew")
+                ctk.CTkLabel(
+                    cell, text=spd_text, font=ctk.CTkFont(size=16, weight="bold"),
+                ).grid(row=1, column=0, padx=4, pady=(0, 0), sticky="ew")
+                ctk.CTkLabel(
+                    cell, text=f"{pct_text} of pitches", font=ctk.CTkFont(size=10),
+                    text_color="gray60",
+                ).grid(row=2, column=0, padx=4, pady=(0, 8), sticky="ew")
 
     def _render_score_row(self, parent, away, home) -> None:
         box = ctk.CTkFrame(parent, fg_color=("gray88", "gray20"), corner_radius=8)
@@ -2161,12 +2624,18 @@ class App(ctk.CTk):
 
         name_box = ctk.CTkFrame(scroll, fg_color="transparent")
         name_box.grid(row=0, column=1, sticky="new", pady=(12, 6))
+        name_row = ctk.CTkFrame(name_box, fg_color="transparent")
+        name_row.pack(fill="x")
         ctk.CTkLabel(
-            name_box,
+            name_row,
             text=bio.get("fullName", "Unknown"),
             font=ctk.CTkFont(size=24, weight="bold"),
             anchor="w",
-        ).pack(anchor="w")
+        ).pack(side="left", anchor="w")
+        self._add_fav_button(
+            name_row, "players",
+            {"id": player_id, "name": bio.get("fullName", "")},
+        )
 
         team = (bio.get("currentTeam") or {}).get("name", "—")
         pos = (bio.get("primaryPosition") or {}).get("name", "—")

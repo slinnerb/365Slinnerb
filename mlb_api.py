@@ -215,8 +215,120 @@ def get_team_standing(team_id: int, season: int | None = None) -> dict[str, Any]
                     "leagueRank": tr.get("leagueRank"),
                     "gamesBack": tr.get("gamesBack"),
                     "streak": (tr.get("streak") or {}).get("streakCode"),
+                    "division": DIVISION_NAMES.get((rec.get("division") or {}).get("id"), ""),
                 }
     return {}
+
+
+DIVISION_NAMES = {
+    200: "AL West", 201: "AL East", 202: "AL Central",
+    203: "NL West", 204: "NL East", 205: "NL Central",
+}
+DIVISION_ORDER = [201, 202, 200, 204, 205, 203]
+
+
+def get_standings(season: int | None = None) -> list[dict[str, Any]]:
+    """Return the six divisions in display order; each has its teams ranked 1st→last."""
+    season = season or current_season()
+    try:
+        data = _get("/standings", leagueId="103,104", season=season, standingsTypes="regularSeason")
+    except requests.HTTPError:
+        return []
+    by_div: dict[int, dict[str, Any]] = {}
+    for rec in data.get("records", []):
+        div_id = (rec.get("division") or {}).get("id")
+        teams = []
+        for tr in rec.get("teamRecords", []):
+            teams.append(
+                {
+                    "id": (tr.get("team") or {}).get("id"),
+                    "name": (tr.get("team") or {}).get("name", ""),
+                    "wins": tr.get("wins"),
+                    "losses": tr.get("losses"),
+                    "pct": tr.get("winningPercentage"),
+                    "gamesBack": tr.get("gamesBack"),
+                    "divisionRank": tr.get("divisionRank"),
+                    "streak": (tr.get("streak") or {}).get("streakCode"),
+                }
+            )
+
+        def _rank(t):
+            r = str(t.get("divisionRank", ""))
+            return int(r) if r.isdigit() else 99
+
+        teams.sort(key=_rank)
+        if div_id is not None:
+            by_div[div_id] = {"name": DIVISION_NAMES.get(div_id, "Division"), "teams": teams}
+    return [by_div[d] for d in DIVISION_ORDER if d in by_div]
+
+
+def get_leaders(category: str, group: str, limit: int = 15, season: int | None = None) -> list[dict[str, Any]]:
+    """Return the top players for a single stat category."""
+    season = season or current_season()
+    try:
+        data = _get(
+            "/stats/leaders",
+            leaderCategories=category, statGroup=group,
+            season=season, sportId=1, limit=limit,
+        )
+    except requests.HTTPError:
+        return []
+    out: list[dict[str, Any]] = []
+    for block in data.get("leagueLeaders", []):
+        for ldr in block.get("leaders", []):
+            out.append(
+                {
+                    "rank": ldr.get("rank"),
+                    "id": (ldr.get("person") or {}).get("id"),
+                    "name": (ldr.get("person") or {}).get("fullName", ""),
+                    "team": (ldr.get("team") or {}).get("name", ""),
+                    "value": ldr.get("value"),
+                }
+            )
+        if out:
+            break
+    return out[:limit]
+
+
+def get_team_games(team_id: int, season: int | None = None) -> dict[str, Any]:
+    """Return {'last': game|None, 'next': game|None} for a team, around today."""
+    if not team_id:
+        return {"last": None, "next": None}
+    today = datetime.now().date()
+    start = today - timedelta(days=10)
+    end = today + timedelta(days=14)
+    try:
+        data = _get(
+            "/schedule",
+            sportId=1, teamId=team_id,
+            startDate=start.isoformat(), endDate=end.isoformat(),
+            hydrate="probablePitcher",
+        )
+    except requests.HTTPError:
+        return {"last": None, "next": None}
+
+    games = [g for d in data.get("dates", []) for g in d.get("games", [])]
+
+    def simplify(g):
+        home = (g.get("teams") or {}).get("home") or {}
+        away = (g.get("teams") or {}).get("away") or {}
+        st = g.get("status") or {}
+        return {
+            "gamePk": g.get("gamePk"),
+            "date": (g.get("gameDate") or "")[:10],
+            "gameDate": g.get("gameDate"),
+            "status": st.get("detailedState", ""),
+            "home_name": (home.get("team") or {}).get("name", ""),
+            "home_score": home.get("score"),
+            "away_name": (away.get("team") or {}).get("name", ""),
+            "away_score": away.get("score"),
+        }
+
+    finals = [g for g in games if (g.get("status") or {}).get("abstractGameState") == "Final"]
+    upcoming = [g for g in games if (g.get("status") or {}).get("abstractGameState") in ("Preview", "Live")]
+    last = simplify(sorted(finals, key=lambda g: g.get("gameDate", ""))[-1]) if finals else None
+    nxt = simplify(sorted(upcoming, key=lambda g: g.get("gameDate", ""))[0]) if upcoming else None
+    return {"last": last, "next": nxt}
 
 
 @lru_cache(maxsize=512)
@@ -377,10 +489,13 @@ def get_game_detail(game_pk: int) -> dict[str, Any]:
     plays = ld.get("plays", {}) or {}
     current_play = plays.get("currentPlay") or {}
 
+    probable_pitchers = gd.get("probablePitchers", {}) or {}
+
     def _team_summary(side: str) -> dict[str, Any]:
         meta = teams_meta.get(side, {}) or {}
         ls_team = (linescore.get("teams", {}) or {}).get(side, {}) or {}
         bs_team = (boxscore.get("teams", {}) or {}).get(side, {}) or {}
+        pp = probable_pitchers.get(side) or {}
         return {
             "id": meta.get("id"),
             "name": meta.get("name", ""),
@@ -389,6 +504,8 @@ def get_game_detail(game_pk: int) -> dict[str, Any]:
             "hits": ls_team.get("hits"),
             "errors": ls_team.get("errors"),
             "leftOnBase": ls_team.get("leftOnBase"),
+            "probablePitcherId": pp.get("id"),
+            "probablePitcherName": pp.get("fullName", ""),
             "players": _extract_players(bs_team),
             "battingOrder": bs_team.get("battingOrder", []),
             "pitchers": bs_team.get("pitchers", []),

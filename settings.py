@@ -240,3 +240,34 @@ def clear_history(name: str) -> None:
     if name in profs:
         profs[name]["history"] = []
         _save_profiles(profs)
+
+
+def get_favorites(name: str, kind: str) -> list[dict[str, Any]]:
+    """kind is 'teams' or 'players'. Returns [{'id':.., 'name':..}, ...]."""
+    if not name:
+        return []
+    return list(_profile(name).get(f"favorite_{kind}") or [])
+
+
+def is_favorite(name: str, kind: str, item_id: Any) -> bool:
+    return any(x.get("id") == item_id for x in get_favorites(name, kind))
+
+
+def toggle_favorite(name: str, kind: str, item: dict[str, Any]) -> bool:
+    """Add or remove a favorite. Returns the new state (True = now a favorite)."""
+    if not name or not item.get("id"):
+        return False
+    profs = _load_profiles()
+    prof = profs.get(name) or {"interests": "", "history": []}
+    key = f"favorite_{kind}"
+    lst = list(prof.get(key) or [])
+    if any(x.get("id") == item["id"] for x in lst):
+        lst = [x for x in lst if x.get("id") != item["id"]]
+        new_state = False
+    else:
+        lst.append({"id": item["id"], "name": item.get("name", "")})
+        new_state = True
+    prof[key] = lst
+    profs[name] = prof
+    _save_profiles(profs)
+    return new_state
