@@ -87,6 +87,14 @@ WHATS_NEW: dict[str, str] = {
         "• Team pages — click a team for its record, standing, and schedule.\n"
         "• Probable starters' pitch arsenals now show on the game page."
     ),
+    "1.0.5": (
+        "Fixes in this version:\n"
+        "• Rosters and lists now always start at the top (no more lists that "
+        "looked cut off).\n"
+        "• Updates verify the download before installing, so a dropped connection "
+        "can't leave the app broken.\n"
+        "• Clearer message if the AI password has an unsupported character."
+    ),
 }
 
 # (display label, MLB API category key, stat group) for the League Leaders view.
@@ -1287,6 +1295,15 @@ class App(ctk.CTk):
         for child in frame.winfo_children():
             child.destroy()
 
+    def _players_scroll_top(self) -> None:
+        """Snap the (reused) middle list back to the top after repopulating it —
+        otherwise a leftover scroll position can make a new list look cut off."""
+        try:
+            self.players_frame.update_idletasks()
+            self.players_frame._parent_canvas.yview_moveto(0.0)
+        except Exception:
+            pass
+
     def _show_placeholder(self, text: str) -> None:
         self._detail_mode = "empty"
         self._clear_frame(self.detail_frame)
@@ -1418,6 +1435,7 @@ class App(ctk.CTk):
                 hover_color=("gray85", "gray25"),
                 command=lambda pid=p["id"]: self._on_player_selected(pid),
             ).pack(fill="x", padx=4, pady=1)
+        self._players_scroll_top()
         self._set_status(f"{team_name}: {len(roster)} players on active roster.")
 
     def _on_search(self) -> None:
@@ -1501,6 +1519,8 @@ class App(ctk.CTk):
             return
         for g in games:
             self._render_game_card(g)
+        if not is_refresh:
+            self._players_scroll_top()
         tz_label = user_settings.current_zone_label()
         self._set_status(f"{len(games)} game(s) on {date.strftime('%a %b %d, %Y')}  •  Times: {tz_label}")
         # Only show the hint in the detail pane on the FIRST load and only when the
@@ -2550,6 +2570,7 @@ class App(ctk.CTk):
                 hover_color=("gray85", "gray25"),
                 command=lambda pid=p["id"]: self._on_player_selected(pid),
             ).pack(fill="x", padx=4, pady=1)
+        self._players_scroll_top()
         self._set_status(f"{len(matches)} player(s) matched '{query}'.")
 
     def _on_player_selected(self, player_id: int) -> None:

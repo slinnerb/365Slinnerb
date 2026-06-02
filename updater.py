@@ -26,7 +26,7 @@ ASSET_PATTERN = re.compile(r"^MLB-Stats-Viewer.*\.exe$", re.IGNORECASE)
 
 # Bump this every release. Tag your GitHub release as "v" + this string,
 # e.g. VERSION = "1.0.1"  →  git tag v1.0.1
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 # ============================================================
 
 
@@ -143,7 +143,9 @@ def download_update(
     progress: Callable[[int, int], None] | None = None,
     timeout: int = 60,
 ) -> None:
-    """Download an .exe asset to `dest`. Reports progress(bytes_done, total)."""
+    """Download an .exe asset to `dest`, verifying it completed and looks like a
+    real Windows executable. Raises on any problem so a corrupt/partial download
+    is never installed (that causes 'Failed to load Python DLL' errors)."""
     with requests.get(url, stream=True, timeout=timeout) as r:
         r.raise_for_status()
         total = int(r.headers.get("Content-Length") or 0)
@@ -157,6 +159,36 @@ def download_update(
                 done += len(chunk)
                 if progress is not None:
                     progress(done, total)
+
+    # Integrity checks — abort (and delete the bad file) if anything's off.
+    actual = dest.stat().st_size if dest.exists() else 0
+    if total and actual != total:
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        raise IOError(
+            f"Download was incomplete ({actual:,} of {total:,} bytes). "
+            "Check your connection and try again, or download the .exe from the "
+            "GitHub releases page."
+        )
+    if actual < 1_000_000:  # a real build is tens of MB; tiny means an error page
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        raise IOError("Downloaded file is too small to be the app — try again.")
+    with open(dest, "rb") as f:
+        if f.read(2) != b"MZ":  # every Windows .exe starts with 'MZ'
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+            raise IOError(
+                "Downloaded file isn't a valid Windows program (it may be a "
+                "network error page). Try again, or download from the GitHub "
+                "releases page."
+            )
 
 
 _UPDATER_BAT = r"""@echo off

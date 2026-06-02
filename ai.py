@@ -28,11 +28,26 @@ def get_model() -> str:
     return user_settings.get("ai_model") or DEFAULT_MODEL
 
 
+class PasswordEncodingError(ValueError):
+    """Raised when the configured password can't be sent in an HTTP header."""
+
+
 def _auth_headers() -> dict[str, str]:
     """Authorization header for a password-protected (reverse-proxied) server.
     Empty when no key is configured (plain local Ollama needs none)."""
     key = (user_settings.get("ai_api_key") or "").strip()
-    return {"Authorization": f"Bearer {key}"} if key else {}
+    if not key:
+        return {}
+    # HTTP headers must be Latin-1 encodable. A pasted token sometimes carries a
+    # smart quote / hidden character that isn't — fail with a clear message.
+    try:
+        key.encode("latin-1")
+    except UnicodeEncodeError:
+        raise PasswordEncodingError(
+            "The password has a special character that can't be sent. "
+            "Re-type it by hand using plain letters and numbers (don't paste it)."
+        )
+    return {"Authorization": f"Bearer {key}"}
 
 
 def _verify_tls() -> bool:
@@ -70,6 +85,8 @@ def ping() -> tuple[bool, str]:
                 "Check the API key / password in Settings."
             )
         return False, f"Server returned HTTP {r.status_code}."
+    except PasswordEncodingError as e:
+        return False, str(e)
     except requests.ConnectionError:
         return False, f"Couldn't reach {base}. Is the server running and reachable?"
     except requests.Timeout:
@@ -160,6 +177,8 @@ def stream_chat(
                 if obj.get("done"):
                     break
         on_done(None)
+    except PasswordEncodingError as e:
+        on_done(str(e))
     except requests.ConnectionError:
         on_done(f"Couldn't reach AI server at {get_base_url()}. Is Ollama running?")
     except requests.Timeout:
