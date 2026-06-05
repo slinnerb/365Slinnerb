@@ -23,6 +23,8 @@ DEFAULTS: dict[str, Any] = {
     "ai_api_key": "",        # password/token for a reverse-proxied server (blank = none)
     "ai_verify_ssl": True,   # turn off only for a self-signed HTTPS cert
     "user_name": "",         # active user profile name (blank = no personalization)
+    "odds_api_key": "",      # the-odds-api.com key for the Odds view (blank = off)
+    "odds_region": "us",     # us | uk | eu | au  (bet365 appears in uk/eu/au)
 }
 
 # Preset names offered in the profile dropdown (users can also type their own).
@@ -271,3 +273,54 @@ def toggle_favorite(name: str, kind: str, item: dict[str, Any]) -> bool:
     profs[name] = prof
     _save_profiles(profs)
     return new_state
+
+
+# ---------------------------------------------------------------------------
+# Bet tracker — each user logs bets they place themselves (manual entry).
+# Stored per profile in profiles.json. Money tracking only; no bet placement.
+# ---------------------------------------------------------------------------
+
+def get_bets(name: str) -> list[dict[str, Any]]:
+    if not name:
+        return []
+    return list(_profile(name).get("bets") or [])
+
+
+def add_bet(name: str, bet: dict[str, Any]) -> int | None:
+    """Append a bet; returns the new bet's id."""
+    if not name:
+        return None
+    profs = _load_profiles()
+    prof = profs.get(name) or {"interests": "", "history": []}
+    bets = list(prof.get("bets") or [])
+    new_id = max((b.get("id", 0) for b in bets), default=0) + 1
+    entry = {**bet, "id": new_id}
+    bets.append(entry)
+    prof["bets"] = bets
+    profs[name] = prof
+    _save_profiles(profs)
+    return new_id
+
+
+def update_bet(name: str, bet_id: int, **changes: Any) -> None:
+    if not name:
+        return
+    profs = _load_profiles()
+    prof = profs.get(name) or {}
+    bets = list(prof.get("bets") or [])
+    for b in bets:
+        if b.get("id") == bet_id:
+            b.update(changes)
+    prof["bets"] = bets
+    profs[name] = prof
+    _save_profiles(profs)
+
+
+def delete_bet(name: str, bet_id: int) -> None:
+    if not name:
+        return
+    profs = _load_profiles()
+    prof = profs.get(name) or {}
+    prof["bets"] = [b for b in (prof.get("bets") or []) if b.get("id") != bet_id]
+    profs[name] = prof
+    _save_profiles(profs)

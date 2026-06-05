@@ -16,6 +16,7 @@ from PIL import Image
 
 import ai
 import mlb_api
+import odds_api
 import settings as user_settings
 import updater
 
@@ -94,6 +95,15 @@ WHATS_NEW: dict[str, str] = {
         "• Updates verify the download before installing, so a dropped connection "
         "can't leave the app broken.\n"
         "• Clearer message if the AI password has an unsupported character."
+    ),
+    "1.0.6": (
+        "New — betting helpers (you still place bets yourself):\n"
+        "• Bet Tracker — log your bets, settle them Win/Loss/Push, and see your "
+        "record, profit, and ROI (saved per person).\n"
+        "• Odds (Value) — live moneyline odds with the best price per team and "
+        "the implied win %, so you can spot value. Needs a free key from "
+        "the-odds-api.com (Settings).\n\n"
+        "Note: these are read-only research tools — the app never places bets."
     ),
 }
 
@@ -184,6 +194,19 @@ PITCHING_FIELDS = [
     ("walksPer9Inn", "Walks per 9 Innings"),
     ("strikeoutWalkRatio", "Strikeout-to-Walk Ratio"),
 ]
+
+
+def american_profit(stake: float, odds: str) -> float | None:
+    """Profit (not counting the returned stake) on a winning bet at American odds.
+    +150 → stake*1.5 ; -110 → stake*(100/110). None if odds are unparseable."""
+    s = str(odds).strip().replace("+", "")
+    try:
+        o = float(s)
+    except ValueError:
+        return None
+    if o == 0:
+        return None
+    return stake * (o / 100.0) if o > 0 else stake * (100.0 / abs(o))
 
 
 def _ordinal(n) -> str:
@@ -608,6 +631,30 @@ class SettingsDialog(ctk.CTkToplevel):
             command=self._test_ai,
         ).pack(anchor="w", padx=12, pady=(0, 12))
 
+        # --- Odds (Value) view ---
+        ctk.CTkLabel(content, text="Live odds — used by the 'Odds (Value)' tab:", font=bold, anchor="w").pack(
+            fill="x", padx=12, pady=(4, 4)
+        )
+        odds_grid = ctk.CTkFrame(content, fg_color="transparent")
+        odds_grid.pack(fill="x", padx=12, pady=(0, 2))
+        odds_grid.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(odds_grid, text="API key:", width=80, anchor="w").grid(row=0, column=0, padx=(0, 6), pady=2, sticky="w")
+        self.odds_key_var = ctk.StringVar(value=user_settings.get("odds_api_key") or "")
+        ctk.CTkEntry(odds_grid, textvariable=self.odds_key_var, placeholder_text="free key from the-odds-api.com").grid(
+            row=0, column=1, padx=0, pady=2, sticky="ew",
+        )
+        ctk.CTkLabel(odds_grid, text="Region:", width=80, anchor="w").grid(row=1, column=0, padx=(0, 6), pady=2, sticky="w")
+        self.odds_region_var = ctk.StringVar(value=(user_settings.get("odds_region") or "us"))
+        ctk.CTkOptionMenu(odds_grid, values=odds_api.REGIONS, variable=self.odds_region_var, width=100).grid(
+            row=1, column=1, padx=0, pady=2, sticky="w",
+        )
+        ctk.CTkLabel(
+            content,
+            text="bet365 appears in the uk / eu / au regions (not us). Free tier = 500 lookups/month.",
+            font=ctk.CTkFont(size=11), text_color="gray60", anchor="w", wraplength=440, justify="left",
+        ).pack(fill="x", padx=12, pady=(0, 12))
+
         # Fixed buttons at the bottom
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=18, pady=(6, 14))
@@ -642,6 +689,8 @@ class SettingsDialog(ctk.CTkToplevel):
             "ai_api_key": self.ai_key_var.get().strip(),
             "ai_verify_ssl": bool(self.ai_verify_var.get()),
             "user_name": name,
+            "odds_api_key": self.odds_key_var.get().strip(),
+            "odds_region": self.odds_region_var.get().strip() or "us",
         })
         if name:
             user_settings.set_interests(name, self.interests_var.get().strip())
@@ -1269,6 +1318,16 @@ class App(ctk.CTk):
             nav, text="★ Favorites", height=30,
             fg_color="#8a6d2b", hover_color="#665020",
             command=self._show_favorites,
+        ).pack(fill="x", padx=6, pady=2)
+        ctk.CTkButton(
+            nav, text="Bet Tracker", height=30,
+            fg_color="#2b7a4b", hover_color="#1f5a37",
+            command=self._show_bets,
+        ).pack(fill="x", padx=6, pady=2)
+        ctk.CTkButton(
+            nav, text="Odds (Value)", height=30,
+            fg_color="#2b7a4b", hover_color="#1f5a37",
+            command=self._show_odds,
         ).pack(fill="x", padx=6, pady=(2, 6))
 
         self.teams_frame = ctk.CTkScrollableFrame(left_col, label_text="Teams")
@@ -1848,6 +1907,9 @@ class App(ctk.CTk):
         # If the AI tab is open, reopen it so a changed name/profile takes effect.
         if self._detail_mode == "ai":
             self._on_open_ai_chat()
+        # If the Odds tab is open, force a refresh (key/region may have changed).
+        if self._detail_mode == "odds":
+            self._show_odds(force=True)
 
     def _add_fav_button(self, parent, kind: str, item: dict[str, Any]):
         """A ★ toggle that adds/removes `item` from the active user's favorites."""
@@ -2079,6 +2141,287 @@ class App(ctk.CTk):
             info.configure(text="\n".join(lines) if lines else "No nearby games.")
 
         run_in_thread(fetch, show)
+
+    # ----- Bet tracker -----
+    def _show_bets(self) -> None:
+        self._current_game_pk = None
+        self._cancel_detail_refresh()
+        self._detail_mode = "bets"
+        self._clear_frame(self.detail_frame)
+        name = (user_settings.get("user_name") or "").strip()
+
+        scroll = ctk.CTkScrollableFrame(self.detail_frame)
+        scroll.pack(fill="both", expand=True, padx=8, pady=8)
+
+        ctk.CTkLabel(
+            scroll, text="Bet Tracker" if not name else f"{name}'s Bet Tracker",
+            font=ctk.CTkFont(size=18, weight="bold"), anchor="w",
+        ).pack(anchor="w", padx=8, pady=(4, 2))
+        ctk.CTkLabel(
+            scroll,
+            text="Log bets you place yourself in bet365 — this tracks your record and profit. "
+                 "(It does not place bets.)",
+            font=ctk.CTkFont(size=11), text_color="gray60", anchor="w",
+            wraplength=560, justify="left",
+        ).pack(anchor="w", padx=8, pady=(0, 8))
+
+        if not name:
+            ctk.CTkLabel(
+                scroll, text="Set your name in Settings first, then your bets are saved to your profile.",
+                text_color="gray70", wraplength=520, justify="left", anchor="w",
+            ).pack(anchor="w", padx=8, pady=10)
+            self._set_status("Bet Tracker — set your name in Settings.")
+            return
+
+        bets = user_settings.get_bets(name)
+
+        # Summary
+        self._render_bet_summary(scroll, bets)
+
+        # Add-bet form
+        form = ctk.CTkFrame(scroll)
+        form.pack(fill="x", padx=6, pady=(10, 6))
+        ctk.CTkLabel(form, text="Add a bet", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(anchor="w", padx=10, pady=(8, 4))
+        grid = ctk.CTkFrame(form, fg_color="transparent")
+        grid.pack(fill="x", padx=8, pady=(0, 8))
+        grid.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(grid, text="Bet:", width=60, anchor="w").grid(row=0, column=0, padx=(0, 6), pady=2, sticky="w")
+        self._bet_desc = ctk.StringVar()
+        ctk.CTkEntry(grid, textvariable=self._bet_desc, placeholder_text="e.g. Yankees ML vs Red Sox").grid(row=0, column=1, columnspan=3, padx=0, pady=2, sticky="ew")
+
+        ctk.CTkLabel(grid, text="Stake $:", width=60, anchor="w").grid(row=1, column=0, padx=(0, 6), pady=2, sticky="w")
+        self._bet_stake = ctk.StringVar()
+        ctk.CTkEntry(grid, textvariable=self._bet_stake, placeholder_text="10", width=90).grid(row=1, column=1, padx=0, pady=2, sticky="w")
+        ctk.CTkLabel(grid, text="Odds:", width=50, anchor="e").grid(row=1, column=2, padx=(8, 6), pady=2, sticky="e")
+        self._bet_odds = ctk.StringVar()
+        ctk.CTkEntry(grid, textvariable=self._bet_odds, placeholder_text="-110 or +150", width=110).grid(row=1, column=3, padx=0, pady=2, sticky="w")
+
+        self._bet_form_msg = ctk.CTkLabel(form, text="", font=ctk.CTkFont(size=11), text_color="tomato", anchor="w")
+        self._bet_form_msg.pack(anchor="w", padx=12, pady=(0, 2))
+        ctk.CTkButton(form, text="Add bet", width=110, command=lambda: self._add_bet(name)).pack(anchor="w", padx=10, pady=(0, 10))
+
+        # Bet list (most recent first)
+        ctk.CTkLabel(scroll, text="Your bets", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(anchor="w", padx=8, pady=(8, 2))
+        if not bets:
+            ctk.CTkLabel(scroll, text="No bets logged yet.", text_color="gray70", anchor="w").pack(anchor="w", padx=10, pady=6)
+        for b in sorted(bets, key=lambda x: x.get("id", 0), reverse=True):
+            self._render_bet_row(scroll, name, b)
+
+        self._set_status(f"{name}'s bet tracker — {len(bets)} bet(s).")
+
+    def _render_bet_summary(self, parent, bets) -> None:
+        settled = [b for b in bets if b.get("result") in ("win", "loss", "push")]
+        wins = sum(1 for b in settled if b["result"] == "win")
+        losses = sum(1 for b in settled if b["result"] == "loss")
+        pushes = sum(1 for b in settled if b["result"] == "push")
+        staked = sum(float(b.get("stake") or 0) for b in settled)
+        net = 0.0
+        for b in settled:
+            stake = float(b.get("stake") or 0)
+            if b["result"] == "win":
+                p = american_profit(stake, b.get("odds", ""))
+                net += p if p is not None else 0.0
+            elif b["result"] == "loss":
+                net -= stake
+        roi = (net / staked * 100.0) if staked else 0.0
+        pending = sum(1 for b in bets if b.get("result", "pending") == "pending")
+
+        box = ctk.CTkFrame(parent, fg_color=("gray88", "gray20"), corner_radius=8)
+        box.pack(fill="x", padx=6, pady=4)
+        cells = [
+            ("Record", f"{wins}-{losses}" + (f"-{pushes}" if pushes else "")),
+            ("Staked", f"${staked:,.2f}"),
+            ("Net P/L", f"${net:+,.2f}"),
+            ("ROI", f"{roi:+.1f}%"),
+            ("Pending", str(pending)),
+        ]
+        for i, (label, val) in enumerate(cells):
+            box.grid_columnconfigure(i, weight=1, uniform="betsum")
+            color = ("gray10", "gray90")
+            if label == "Net P/L":
+                color = "#42b883" if net > 0 else ("tomato" if net < 0 else ("gray10", "gray90"))
+            if label == "ROI":
+                color = "#42b883" if net > 0 else ("tomato" if net < 0 else ("gray10", "gray90"))
+            ctk.CTkLabel(box, text=label, font=ctk.CTkFont(size=10, weight="bold"), text_color="gray60").grid(row=0, column=i, padx=6, pady=(8, 0))
+            ctk.CTkLabel(box, text=val, font=ctk.CTkFont(size=16, weight="bold"), text_color=color).grid(row=1, column=i, padx=6, pady=(0, 8))
+
+    def _render_bet_row(self, parent, name, b) -> None:
+        result = b.get("result", "pending")
+        stake = float(b.get("stake") or 0)
+        row = ctk.CTkFrame(parent, fg_color=("gray88", "gray22"), corner_radius=6)
+        row.pack(fill="x", padx=6, pady=3)
+
+        top = ctk.CTkFrame(row, fg_color="transparent")
+        top.pack(fill="x", padx=8, pady=(6, 0))
+        ctk.CTkLabel(
+            top, text=b.get("description", "(bet)"), font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="w", wraplength=400, justify="left",
+        ).pack(side="left")
+        # Outcome amount
+        if result == "win":
+            p = american_profit(stake, b.get("odds", "")) or 0.0
+            outcome = f"+${p:,.2f}"; oc_color = "#42b883"
+        elif result == "loss":
+            outcome = f"-${stake:,.2f}"; oc_color = "tomato"
+        elif result == "push":
+            outcome = "$0.00"; oc_color = "gray70"
+        else:
+            outcome = "pending"; oc_color = "gray60"
+        ctk.CTkLabel(top, text=outcome, font=ctk.CTkFont(size=13, weight="bold"), text_color=oc_color).pack(side="right")
+
+        meta = ctk.CTkFrame(row, fg_color="transparent")
+        meta.pack(fill="x", padx=8, pady=(0, 4))
+        ctk.CTkLabel(
+            meta, text=f"${stake:,.2f} @ {b.get('odds','?')}   •   {b.get('date','')}",
+            font=ctk.CTkFont(size=11), text_color="gray60", anchor="w",
+        ).pack(side="left")
+
+        actions = ctk.CTkFrame(row, fg_color="transparent")
+        actions.pack(fill="x", padx=8, pady=(0, 8))
+        if result == "pending":
+            for label, val, col in [("Win", "win", "#2b7a4b"), ("Loss", "loss", "#a33"), ("Push", "push", "gray40")]:
+                ctk.CTkButton(
+                    actions, text=label, width=56, height=24, fg_color=col, hover_color=col,
+                    command=lambda v=val, bid=b["id"]: self._settle_bet(name, bid, v),
+                ).pack(side="left", padx=(0, 4))
+        else:
+            ctk.CTkButton(
+                actions, text="↺ Pending", width=80, height=24, fg_color="gray35", hover_color="gray45",
+                command=lambda bid=b["id"]: self._settle_bet(name, bid, "pending"),
+            ).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(
+            actions, text="Delete", width=64, height=24, fg_color="gray30", hover_color="#a33",
+            command=lambda bid=b["id"]: self._delete_bet(name, bid),
+        ).pack(side="right")
+
+    def _add_bet(self, name) -> None:
+        desc = self._bet_desc.get().strip()
+        stake_s = self._bet_stake.get().strip()
+        odds_s = self._bet_odds.get().strip()
+        if not desc:
+            self._bet_form_msg.configure(text="Enter what the bet is on.")
+            return
+        try:
+            stake = float(stake_s)
+            if stake <= 0:
+                raise ValueError
+        except ValueError:
+            self._bet_form_msg.configure(text="Stake must be a positive number.")
+            return
+        if american_profit(stake, odds_s) is None:
+            self._bet_form_msg.configure(text="Odds must be American format, e.g. -110 or +150.")
+            return
+        from datetime import datetime as _dt
+        user_settings.add_bet(name, {
+            "description": desc, "stake": stake, "odds": odds_s,
+            "result": "pending", "date": _dt.now().strftime("%Y-%m-%d"),
+        })
+        self._show_bets()  # refresh
+
+    def _settle_bet(self, name, bet_id, result) -> None:
+        user_settings.update_bet(name, bet_id, result=result)
+        self._show_bets()
+
+    def _delete_bet(self, name, bet_id) -> None:
+        user_settings.delete_bet(name, bet_id)
+        self._show_bets()
+
+    # ----- Odds / value viewer -----
+    def _show_odds(self, force: bool = False) -> None:
+        self._current_game_pk = None
+        self._cancel_detail_refresh()
+        self._detail_mode = "odds"
+        self._clear_frame(self.detail_frame)
+        ctk.CTkLabel(self.detail_frame, text="Loading odds…", text_color="gray70").pack(expand=True, pady=60)
+        self._set_status("Loading odds…")
+        run_in_thread(lambda: odds_api.get_mlb_odds(force=force), self._render_odds)
+
+    def _render_odds(self, result: Any) -> None:
+        if self._detail_mode != "odds":
+            return
+        self._clear_frame(self.detail_frame)
+        games, meta = result if isinstance(result, tuple) else ([], {"error": "unexpected"})
+
+        scroll = ctk.CTkScrollableFrame(self.detail_frame)
+        scroll.pack(fill="both", expand=True, padx=8, pady=8)
+
+        header = ctk.CTkFrame(scroll, fg_color="transparent")
+        header.pack(fill="x", padx=8, pady=(4, 2))
+        ctk.CTkLabel(header, text="MLB Moneyline Odds", font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
+        ctk.CTkButton(
+            header, text="↻ Refresh", width=80, height=26,
+            fg_color="#1f6aa5", hover_color="#144870",
+            command=lambda: self._show_odds(force=True),
+        ).pack(side="right")
+
+        err = meta.get("error")
+        if err == "no_key":
+            ctk.CTkLabel(
+                scroll,
+                text=("No odds API key set. Get a free key at the-odds-api.com (500 requests/month), "
+                      "then paste it into Settings → Odds API key."),
+                text_color="gray70", wraplength=560, justify="left", anchor="w",
+            ).pack(anchor="w", padx=10, pady=12)
+            self._set_status("Odds — add an API key in Settings.")
+            return
+        if err:
+            ctk.CTkLabel(scroll, text=err, text_color="tomato", wraplength=560, justify="left", anchor="w").pack(anchor="w", padx=10, pady=12)
+            self._set_status("Odds load failed.")
+            return
+
+        region = odds_api.get_region().upper()
+        remaining = meta.get("remaining")
+        sub = f"Best price across books  •  region: {region}"
+        if remaining is not None:
+            sub += f"  •  {remaining} API requests left this month"
+        ctk.CTkLabel(scroll, text=sub, font=ctk.CTkFont(size=11), text_color="gray60", anchor="w").pack(anchor="w", padx=10, pady=(0, 2))
+        ctk.CTkLabel(
+            scroll,
+            text="Implied % = the break-even win chance baked into the price. Lower % for the same team = better value. "
+                 "Compare these to your bet365 line.",
+            font=ctk.CTkFont(size=11), text_color="gray60", anchor="w", wraplength=560, justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 8))
+
+        if not games:
+            ctk.CTkLabel(scroll, text="No upcoming MLB games with odds right now.", text_color="gray70").pack(anchor="w", padx=10, pady=10)
+            self._set_status("Odds — no games.")
+            return
+
+        for g in games:
+            self._render_odds_game(scroll, g)
+        self._set_status(f"Odds — {len(games)} game(s).")
+
+    def _render_odds_game(self, parent, g) -> None:
+        card = ctk.CTkFrame(parent, fg_color=("gray88", "gray20"), corner_radius=8)
+        card.pack(fill="x", padx=6, pady=5)
+
+        time_text = self._format_game_time(g.get("commence")) or ""
+        ctk.CTkLabel(
+            card, text=f"{g['away']} @ {g['home']}   {time_text}",
+            font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
+        ).pack(anchor="w", padx=12, pady=(8, 4))
+
+        grid = ctk.CTkFrame(card, fg_color="transparent")
+        grid.pack(fill="x", padx=10, pady=(0, 8))
+        for c, h in enumerate(["Team", "Best price", "Implied %", "Book"]):
+            grid.grid_columnconfigure(c, weight=(2 if c == 0 else 1), uniform="odds")
+            ctk.CTkLabel(grid, text=h, font=ctk.CTkFont(size=10, weight="bold"), text_color="gray60",
+                         anchor="w" if c == 0 else "center").grid(row=0, column=c, padx=3, pady=(2, 3), sticky="ew")
+
+        for r, team in enumerate([g["away"], g["home"]], start=1):
+            info = (g.get("best") or {}).get(team)
+            ctk.CTkLabel(grid, text=team, font=ctk.CTkFont(size=12), anchor="w").grid(row=r, column=0, padx=3, pady=2, sticky="ew")
+            if info:
+                ctk.CTkLabel(grid, text=odds_api.fmt_american(info["price"]), font=ctk.CTkFont(size=13, weight="bold"),
+                             anchor="center").grid(row=r, column=1, padx=3, pady=2, sticky="ew")
+                ip = info.get("implied")
+                ctk.CTkLabel(grid, text=f"{ip*100:.1f}%" if ip is not None else "—", font=ctk.CTkFont(size=12),
+                             anchor="center").grid(row=r, column=2, padx=3, pady=2, sticky="ew")
+                ctk.CTkLabel(grid, text=info.get("book", "—"), font=ctk.CTkFont(size=11), text_color="gray60",
+                             anchor="center").grid(row=r, column=3, padx=3, pady=2, sticky="ew")
+            else:
+                ctk.CTkLabel(grid, text="—", anchor="center").grid(row=r, column=1, padx=3, pady=2, sticky="ew")
 
     def _show_game_detail(self, game_pk: int) -> None:
         self._current_game_pk = game_pk
